@@ -1,9 +1,9 @@
-<h1 align="center">🐜 LittleAnt V12.1</h1>
+<h1 align="center">🐜 LittleAnt V13</h1>
 
 <p align="center"><strong>AI Intent Execution System</strong></p>
 
 <p align="center">
-  Compile natural language intent into executable, verifiable, recoverable server actions — via recursive decomposition.
+  Compile natural language intent into executable, verifiable, recoverable server actions — via cycle-based execution.
 </p>
 
 <p align="center">
@@ -45,7 +45,7 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 | **Output** | Text / suggestions | Executable shell commands |
 | **Verification** | None or AI-based | Mechanical (zero AI tokens) |
 | **Failure handling** | Crash or ask user | AI self-recovers (retry → modify → skip) |
-| **Task decomposition** | One-shot plan | Recursive, layer by layer |
+| **Task decomposition** | One-shot plan | Cycle: query → judge → act → repeat |
 | **Transparency** | Black box | Full execution tree, every step logged |
 | **Dependencies** | pip install dozens of packages | None. Pure Python stdlib |
 
@@ -53,7 +53,7 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 
 ```
 ┌─────────────┐     Natural Language    ┌──────────────────┐
-│    User     │ ◄──────────────────────►│  Front-end AI    │
+│    User     │◄──────────────────────► │  Front-end AI    │
 │  (Telegram) │                         │  (Chat, ReadOnly)│
 └─────────────┘                         └────────┬─────────┘
                                                  │ DB queries
@@ -71,7 +71,7 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 ```
 
 - **Front-end AI** — Chats with users, has memory (20-turn context), runs read-only commands, reports results in plain language. Cannot modify anything.
-- **Back-end AI** — JSON only, no memory. Decomposes tasks recursively, generates executable commands, handles failures autonomously. Full read-write access.
+- **Back-end AI** — JSON only, no memory. Writes queries, judges system state, plans actions, handles failures via 3-level recovery. Full read-write access.
 - **Core** — Executes commands, mechanically verifies results, persists state. All verification is code-based, zero AI tokens.
 
 ## Supported AI Providers
@@ -79,6 +79,7 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 | Provider | Model | Status |
 |----------|-------|--------|
 | OpenAI | GPT-4o | ✅ Tested |
+| DeepSeek | DeepSeek-chat | ✅ Supported |
 | Anthropic | Claude Sonnet | ✅ Supported |
 | Google | Gemini 2.0 Flash | ✅ Supported |
 | xAI | Grok 3 | ✅ Supported |
@@ -138,10 +139,12 @@ systemctl start littleant
 ```
 1. You: "Help me install WordPress"
 2. Front-end AI: "Do you want me to execute this?" → You confirm
-3. Back-end AI generates execution plan → You review and approve
-4. Core executes each step silently, verifies each result mechanically
-5. If something fails → AI retries / modifies / skips autonomously
-6. When done → Front-end AI summarizes results in plain language
+3. Back-end AI designs steps, then scans current system state
+4. AI judges: "nginx not installed, PHP not installed" → writes install commands
+5. AI reviews commands → shows you the plan → you approve → executes
+6. AI rescans system → "nginx installed, PHP installed, need to configure"
+7. AI writes config commands → you approve → executes
+8. AI rescans → everything matches goal → done
 ```
 
 ## Real-World Use Cases
@@ -169,11 +172,11 @@ littleant/
 │   ├── i18n/                 # Language files (en.json, zh.json)
 │   ├── ai/adapter.py         # Multi-provider AI adapter (rate limiting, 429 retry)
 │   ├── core/
-│   │   ├── decomposer.py     # Recursive decomposition engine
+│   │   ├── decomposer.py     # Step decomposition (legacy, used for complex tasks)
 │   │   ├── executor.py       # Command executor
 │   │   ├── verifier.py       # 8 mechanical verifiers
-│   │   ├── recovery.py       # Autonomous error recovery
-│   │   ├── orchestrator.py   # Main orchestrator + tool library
+│   │   ├── recovery.py       # Node removal & crash recovery
+│   │   ├── orchestrator.py   # Cycle engine + 3-level recovery (L1/L2/L3)
 │   │   ├── protocol.py       # Command protocol (20 cmds + 7 feedbacks)
 │   │   └── readonly_executor.py  # Read-only executor with whitelist
 │   ├── models/project.py     # Data models & state machine
@@ -207,5 +210,5 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ---
 
 <p align="center">
-  <sub>Built with recursive decomposition and mechanical verification.<br>No third-party dependencies. No trust in AI output.</sub>
+  <sub>Built with cycle-based execution and mechanical verification.<br>No third-party dependencies. No trust in AI output.</sub>
 </p>

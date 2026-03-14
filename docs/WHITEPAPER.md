@@ -1,10 +1,10 @@
-# LittleAnt V12.1 — Whitepaper
+# LittleAnt V13 — Whitepaper
 
 **AI Intent Execution System**
 
-*Compile natural language intent into executable, verifiable, recoverable real-world actions via recursive decomposition.*
+*Compile natural language intent into executable, verifiable, recoverable real-world actions via cycle-based execution.*
 
-V12.1 | March 14, 2026 | Dual AI Butler Architecture
+V13 | March 15, 2026 | Cycle Execution Architecture
 
 ---
 
@@ -12,18 +12,18 @@ V12.1 | March 14, 2026 | Dual AI Butler Architecture
 
 - **V8**: "AI Company" — solved problems with more AI. PM AI, planner AI, reviewer AI, executor AI, plus AI meetings. High cost, long chains, many failure points.
 - **V11**: "AI Minimization" — right direction but stayed at the principle level. Lacked engineering details for task chain generation, user interaction, and error recovery.
-- **V12**: Established the core architecture: one AI butler + recursive decomposition + mechanical verification + command protocol.
-- **V12.1**: Multiple improvements based on review feedback (see below).
+- **V12**: Established dual AI architecture: front-end AI (chat) + back-end AI (execute) + recursive decomposition + mechanical verification + command protocol.
+- **V12.1**: Improved V12 with autonomous recovery, verify effect principle, template library.
+- **V13**: Architecture-level change. Replaced recursive decomposition with **cycle-based execution model**: query → judge → act → repeat. Three-level recovery (L1 command / L2 diagnostic / L3 redesign). Dynamic query commands. Task brief as project specification.
 
-### V12.1 Core Improvements
+### V13 Core Changes (from V12.1)
 
-- **Dual AI Architecture**: Front-end AI (chat, read-only) + Back-end AI (execution, read-write). Clear permission boundary.
-- **Task requires explicit user instruction**: Front-end AI never creates tasks on its own. Double confirmation required.
-- **Failure feedback includes project overview**: `node_failed` includes the full project tree. AI sees "table of contents + error" and naturally traces back to root cause. Program does zero dependency analysis.
-- **Autonomous AI recovery**: Back-end AI handles failures itself (retry/modify/skip). Only escalates to user when safety limits are triggered. Skip = delete node from chain, not mark.
-- **Verify effect principle**: Verify checks the effect of an action, not the artifact. Solves crash recovery and irreversible operation problems simultaneously.
-- **Three-level template drill-down**: AI initiates search → snapshot list → template tree → specific commands. On-demand fetching, no token waste.
-- **Tool command library**: Successful projects automatically save execution chains and tools. AI reuses them for similar future tasks.
+- **Cycle execution model**: No more one-shot decomposition. System runs in cycles: scan system state → AI judges gap to goal → AI writes action → execute → rescan. Every decision is based on real data, not predictions.
+- **Dynamic query commands**: Query commands are not fixed. Each cycle, AI decides what to check based on what the next action needs. Queries serve decisions, not the other way around.
+- **Task brief**: Every project has a specification document (user request + command types + designed steps + AI conclusions). All AI calls include the full brief as context. AI never loses sight of the goal.
+- **Type-driven classification**: Tasks classified as query/create/modify. Pure query tasks skip confirmation. Mixed tasks: query phases auto-execute, create/modify phases need user approval.
+- **Three-level recovery**: L1 command retry/modify → L2 diagnostic query + alternative → L3 expanded info + full redesign. Each level starts with a query. Never guesses. Only asks user after all levels exhausted.
+- **AI model hot-switching**: Switch between GPT-4o/DeepSeek/Claude/Gemini/Grok from Telegram without restart. API keys validated and stored per provider.
 
 ---
 
@@ -289,17 +289,20 @@ Background execution doesn't flood the user with messages. Progress is written t
 
 ---
 
-## 13. V8 / V11 / V12.1 Comparison
+## 13. V8 / V11 / V13 Comparison
 
-| Dimension | V8 | V11 | V12.1 |
+| Dimension | V8 | V11 | V13 |
 |-----------|-----|------|-------|
-| AI roles | 5+ (PM, planner, reviewer, executor, auditor) | 2 (Planner, Reviewer) | 2 (Front-end read-only + Back-end execute) |
-| Task chain generation | PM AI + 4-role pipeline | Planner AI one-shot | Recursive decomposition, layer by layer |
-| Verification | AI reviews AI | Program-first + AI backup | Pure mechanical + effect principle |
-| Failure handling | PM AI decides (no global view) | Undefined after report | AI autonomous recovery with full project tree |
-| Task trigger | PM AI decides | Undefined | User explicit instruction + double confirm |
-| Template reuse | Employee evaluation stats | Command library + case library | Three-level drill-down + tool command library |
+| Dimension | V8 | V11 | V12.1 | V13 |
+|-----------|-----|------|-------|-----|
+| AI roles | 5+ (PM, planner, reviewer, executor, auditor) | 2 (Planner, Reviewer) | 2 (Front-end read-only + Back-end execute) | 2 (Front-end chat + Back-end execute) |
+| Execution model | PM AI + 4-role pipeline | Planner AI one-shot | Recursive decomposition, layer by layer | Cycle: query → judge → act → repeat |
+| Planning | One-shot full plan | One-shot full plan | Recursive, all at once | Per-cycle, based on real data |
+| Verification | AI reviews AI | Program-first + AI backup | Pure mechanical + effect principle | Mechanical + cycle re-query as verification |
+| Failure handling | PM AI decides (no global view) | Undefined after report | AI autonomous recovery | 3-level: L1 retry → L2 diagnose → L3 redesign |
+| Task trigger | PM AI decides | Undefined | User explicit + double confirm | Type-driven: query auto, create/modify confirm |
+| Template reuse | Employee evaluation stats | Command library + case library | Three-level drill-down | Tool library + template library |
 
 ---
 
-*— V12.1 - Dual AI Butler Architecture —*
+*— V13 - Cycle Execution Architecture —*

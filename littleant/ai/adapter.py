@@ -1,7 +1,7 @@
 """
-LittleAnt V12.1 - AI Adapter
-Dual AI: Front-end (chat, memory) + Back-end (execution, JSON only).
-Supports OpenAI-compatible APIs: GPT, Claude, Gemini, Grok.
+LittleAnt V13 - AI Adapter
+Cycle execution model: query → judge → act → query → ... → goal met
+Three-level recovery: L1 command-level → L2 query+diagnose → L3 redesign
 """
 from __future__ import annotations
 import json, logging, time
@@ -9,103 +9,213 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
-EXECUTOR_PROMPT = """You are LittleAnt's execution engine. Senior Linux sysadmin. JSON only.
+# ============================================================
+# Phase 1: Classify task types
+# ============================================================
+PROMPT_CLASSIFY = """Analyze this task. What operation types does it contain?
+Reply pure JSON: {{"types":["query"],"summary":"brief"}}
+types: "query" (read-only), "create" (install/new), "modify" (change/upgrade)
+Task: {task}"""
 
-## Core rule: Type-driven decomposition
+# ============================================================
+# Phase 2: Design steps
+# ============================================================
+PROMPT_DESIGN = """You are a senior Linux sysadmin. Design execution steps.
 
-Every task must be decomposed into an ordered sequence of typed steps:
-- "query" — read-only commands (ls, cat, free, nginx -v, systemctl status). Zero risk. These run automatically without user confirmation.
-- "create" — create new files, install software, set up new services. Needs user confirmation.
-- "modify" — change existing configs, upgrade software, alter settings. Needs user confirmation.
+User request: {user_request}
+Command types: {command_types}
 
-Example for "check LNMP and upgrade if needed":
-{"cmd":"create_project","name":"LNMP Check & Upgrade","goal":"Check LNMP versions and upgrade","children":[
-  {"id":"1","name":"Check Nginx version","type":"query","depends_on":[]},
-  {"id":"2","name":"Check MySQL version","type":"query","depends_on":[]},
-  {"id":"3","name":"Check PHP version","type":"query","depends_on":[]},
-  {"id":"4","name":"Upgrade Nginx","type":"modify","depends_on":["1"]},
-  {"id":"5","name":"Upgrade PHP","type":"modify","depends_on":["3"]},
-  {"id":"6","name":"Verify upgrades","type":"query","depends_on":["4","5"]}
-]}
+Reply pure JSON:
+{{"steps":[
+  {{"step":1,"type":"think","name":"Analyze best approach","depends_on":[]}},
+  {{"step":2,"type":"query","name":"Check current state","depends_on":[]}},
+  {{"step":3,"type":"create","name":"Install missing","depends_on":[2]}},
+  {{"step":4,"type":"query","name":"Verify results","depends_on":[3]}}
+]}}
 
-## Decomposition rules
-- Each step should map to 1-3 shell commands, not more
-- query steps: give executable commands directly, don't split further
-- create/modify steps: can have 2-4 sub-steps max
-- NEVER add steps user didn't ask for (no emails, reports, backups unless asked)
-- Total leaf nodes should not exceed 30 for any project
+Types: "think" (AI reasoning), "query" (read-only cmd), "create" (install), "modify" (change)
+Rules:
+- Order by dependency. Do non-dependent things first.
+- think steps: AI does immediately, no server command.
+- Only do what user asked. Keep minimal."""
 
-## Response format (JSON only)
+# ============================================================
+# Phase 2b: Think step
+# ============================================================
+PROMPT_THINK = """Complete this analysis step.
 
-Executable (preferred):
-{"cmd":"executable","node_id":"1.1","execute":{"type":"run_shell","command":"nginx -v 2>&1"},"verify":{"type":"return_code_eq","command":"nginx -v","expected_code":0},"on_fail":"report"}
+=== TASK ===
+{task_brief}
 
-Subtasks:
-{"cmd":"subtasks","children":[{"id":"1.1","name":"Get version","type":"query","depends_on":[]}]}
+Step {step_number}: {step_name}
 
-## verify rules
-- Check EFFECT not ARTIFACT
-- All params must be filled
+Reply JSON: {{"conclusion":"your specific, actionable conclusion"}}"""
+
+# ============================================================
+# Phase 3: Write base query commands
+# ============================================================
+PROMPT_WRITE_QUERY = """Write read-only query commands to check the current system state.
+These commands will be reused every cycle to monitor progress.
+
+=== TASK ===
+{task_brief}
+
+=== WHAT WE NEED TO KNOW FOR NEXT STEP ===
+{next_step_info}
+
+=== PREVIOUS QUERY RESULTS (if any) ===
+{previous_results}
+
+Reply JSON:
+{{"commands":[
+  {{"id":"q1","name":"Check nginx version","command":"nginx -v 2>&1"}},
+  {{"id":"q2","name":"Check PHP version","command":"php -v"}}
+]}}
+
+Rules:
+- Only read-only commands (no install, no modify, no write)
+- Include everything needed to decide the next action
+- If previous results show gaps, add supplementary queries"""
+
+# ============================================================
+# Phase 4: Judge - compare snapshot with goal
+# ============================================================
+PROMPT_JUDGE = """Compare the current system state with the user's goal.
+
+=== TASK ===
+{task_brief}
+
+=== CURRENT SYSTEM STATE ===
+{snapshot}
+
+=== GOAL ===
+{goal}
+
+Reply JSON:
+{{"goal_met":false,"gap":"what's still missing","next_action":"what to do next","action_type":"create"}}
+or
+{{"goal_met":true,"summary":"everything is done, here's what was achieved"}}
+
+action_type: "create" or "modify"
+Be specific about what exactly needs to be done."""
+
+# ============================================================
+# Phase 5: Write action commands
+# ============================================================
+PROMPT_WRITE_ACTION = """Write executable commands for this action.
+
+=== TASK ===
+{task_brief}
+
+=== CURRENT STATE ===
+{snapshot}
+
+=== ACTION ===
+{action_description}
+
+Reply JSON:
+{{"commands":[
+  {{"id":"a1","name":"description","execute":{{"type":"run_shell","command":"actual cmd"}},"verify":{{"type":"return_code_eq","command":"verify cmd","expected_code":0}}}}
+]}}
+
+Rules:
 - execute.type: run_shell, write_file, make_dir, read_file, http_request
-- verify.type: return_code_eq, file_exists, content_contains, service_active, http_status_eq, json_field_eq, dns_resolves_to, port_open
-"""
+- verify: check EFFECT not ARTIFACT. All params must be filled.
+- Keep minimal. 1-5 commands max."""
 
-RECOVERY_PROMPT = """You are LittleAnt's execution engine. A node failed. Decide how to handle it.
+# ============================================================
+# Phase 6: Review commands before execution
+# ============================================================
+PROMPT_REVIEW = """Review these commands before execution.
 
-## Reply with ONE of these commands (pure JSON):
+=== TASK ===
+{task_brief}
 
-1. Retry (temporary failure):
-{"cmd":"retry","node_id":"xxx"}
+=== COMMANDS ===
+{commands}
 
-2. Modify (change the command):
-{"cmd":"modify","node_id":"xxx","execute":{"type":"run_shell","command":"new cmd"},"verify":{"type":"return_code_eq","command":"verify","expected_code":0}}
+Check: correct? safe? order right? verify appropriate?
 
-3. Replan (the whole approach is wrong, go back to parent and try a different path):
-{"cmd":"replan","node_id":"xxx","target_parent":"parent_id","reason":"why this approach failed"}
+Reply JSON:
+{{"approved":true}} or {{"approved":false,"issues":["issue"],"fixed_commands":[...]}}"""
 
-4. Skip (non-critical step, skip it):
-{"cmd":"skip","node_id":"xxx"}
+# ============================================================
+# L1 Recovery: command-level retry/modify
+# ============================================================
+PROMPT_L1_RECOVERY = """A command failed. Decide: retry, modify, or give up.
 
-5. Abort (only if the goal itself is impossible):
-{"cmd":"abort","reason":"reason"}
+Failed: {node_name}
+Error: {error}
+Output: {output}
 
-## Priority: retry → modify → replan → skip → abort
-- retry: temporary errors, network issues
-- modify: command not found, wrong syntax, permission denied
-- replan: the entire approach doesn't work (e.g. tried compiling from source but should use apt)
-- skip: truly non-critical steps only
-- abort: ONLY when the goal is fundamentally impossible
+Reply JSON:
+{{"cmd":"retry"}} or {{"cmd":"modify","execute":{{"type":"run_shell","command":"new cmd"}},"verify":{{"type":"return_code_eq","command":"verify","expected_code":0}}}} or {{"cmd":"give_up","reason":"why"}}"""
 
-## Check project_tree to understand context. NEVER use report_to_user.
-"""
+# ============================================================
+# L2 Recovery: diagnostic query
+# ============================================================
+PROMPT_L2_DIAGNOSE = """A step failed even after retries. Diagnose why and suggest alternatives.
 
+=== TASK ===
+{task_brief}
+
+=== FAILED STEP ===
+{failed_info}
+
+=== NEED DIAGNOSTIC QUERIES ===
+Write read-only commands to understand why it failed and find alternatives.
+
+Reply JSON:
+{{"diagnostic_queries":[
+  {{"id":"d1","name":"Check why failed","command":"read-only diagnostic cmd"}}
+]}}"""
+
+PROMPT_L2_FIX = """Based on diagnostic results, write an alternative approach.
+
+=== TASK ===
+{task_brief}
+
+=== ORIGINAL FAILURE ===
+{failed_info}
+
+=== DIAGNOSTIC RESULTS ===
+{diagnostic_results}
+
+Reply JSON:
+{{"alternative_commands":[
+  {{"id":"alt1","name":"description","execute":{{"type":"run_shell","command":"cmd"}},"verify":{{"type":"return_code_eq","command":"verify","expected_code":0}}}}
+]}}
+or if no alternative exists:
+{{"no_alternative":true,"reason":"why"}}"""
+
+# ============================================================
+# L3 Recovery: full redesign
+# ============================================================
+PROMPT_L3_REDESIGN = """Multiple approaches failed for this step. Do a full redesign.
+
+=== TASK ===
+{task_brief}
+
+=== WHAT FAILED ===
+{all_failures}
+
+=== EXPANDED SYSTEM INFO ===
+{expanded_info}
+
+Redesign the approach completely. Think of a fundamentally different way.
+
+Reply JSON:
+{{"redesigned_commands":[
+  {{"id":"r1","name":"description","execute":{{"type":"run_shell","command":"cmd"}},"verify":{{"type":"return_code_eq","command":"verify","expected_code":0}}}}
+]}}
+or
+{{"impossible":true,"reason":"why this cannot be done"}}"""
+
+# ============================================================
+# Chat prompt (front-end AI)
+# ============================================================
 CHAT_PROMPT = """You are LittleAnt AI Butler, a friendly server management assistant on Telegram.
-
-## Your role
-1. Understand user needs, distinguish chat from tasks
-2. Confirm before creating tasks (only for create/modify operations)
-3. Report progress and results in plain language
-4. Match the user's language (reply in whatever language they use)
-
-## Rules
-- Natural, concise replies
-- Never output JSON or code to users
-- "skip" "forget it" = about current task, NOT a new task
-"""
-
-CLASSIFY_TASK_TYPE_PROMPT = """Analyze this task and determine what operation types it contains.
-
-Task: {task}
-
-Reply with pure JSON:
-{"types": ["query"], "summary": "only checking versions"}
-or
-{"types": ["query", "modify"], "summary": "check versions then upgrade"}
-or
-{"types": ["create"], "summary": "install new software"}
-
-types can contain: "query", "create", "modify"
-"""
+Match the user's language. Be concise and natural. Never output JSON or code."""
 
 
 class AIAdapter(ABC):
@@ -117,7 +227,7 @@ class AIAdapter(ABC):
 
 class OpenAICompatibleAdapter(AIAdapter):
     _last_call_time = 0
-    _call_interval = 1.5
+    _call_interval = 3.0
 
     def __init__(self, api_key: str, base_url: str = "https://api.openai.com/v1",
                  model: str = "gpt-4o", timeout: int = 120):
@@ -127,28 +237,23 @@ class OpenAICompatibleAdapter(AIAdapter):
         self.timeout = timeout
 
     def ask(self, messages, system_prompt=None):
-        return self._parse_json(self._call_api(messages, system_prompt or EXECUTOR_PROMPT, True))
+        return self._parse_json(self._call_api(messages, system_prompt or "", True))
 
     def ask_text(self, messages, system_prompt=None):
         return self._call_api(messages, system_prompt or CHAT_PROMPT, False)
 
     def _call_api(self, messages, system_prompt, json_mode):
         import urllib.request, urllib.error
-        full = [{"role": "system", "content": system_prompt}] + messages
-        body = {"model": self.model, "messages": full, "temperature": 0.2, "max_tokens": 4096}
-        if json_mode:
-            body["response_format"] = {"type": "json_object"}
+        full = ([{"role":"system","content":system_prompt}] if system_prompt else []) + messages
+        body = {"model":self.model,"messages":full,"temperature":0.2,"max_tokens":4096}
+        if json_mode: body["response_format"] = {"type":"json_object"}
         payload = json.dumps(body).encode("utf-8")
-
-        now = time.time()
-        wait = self._call_interval - (now - OpenAICompatibleAdapter._last_call_time)
-        if wait > 0:
-            time.sleep(wait)
-
-        for attempt in range(3):
+        wait = self._call_interval - (time.time() - OpenAICompatibleAdapter._last_call_time)
+        if wait > 0: time.sleep(wait)
+        for attempt in range(5):
             req = urllib.request.Request(
                 f"{self.base_url}/chat/completions", data=payload,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+                headers={"Content-Type":"application/json","Authorization":f"Bearer {self.api_key}"},
                 method="POST")
             OpenAICompatibleAdapter._last_call_time = time.time()
             try:
@@ -156,29 +261,26 @@ class OpenAICompatibleAdapter(AIAdapter):
                     return json.loads(resp.read())["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as e:
                 if e.code == 429:
-                    w = min(int(e.headers.get("Retry-After", 10)), 30)
-                    logger.warning(f"API 429 rate limited, waiting {w}s (attempt {attempt+1})")
-                    time.sleep(w)
-                    continue
+                    w = min(int(e.headers.get("Retry-After",10)),30)
+                    logger.warning(f"API 429, wait {w}s (attempt {attempt+1})")
+                    time.sleep(w); continue
                 raise
-        raise RuntimeError("API rate limited 3 times, giving up")
+        raise RuntimeError("API rate limited 5 times")
 
     def _parse_json(self, text):
         text = text.strip()
         if text.startswith("```"):
             text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```")).strip()
-        try:
-            return json.loads(text)
+        try: return json.loads(text)
         except json.JSONDecodeError as e:
-            raise ValueError(f"AI returned invalid JSON: {e}\nRaw: {text[:500]}")
+            raise ValueError(f"Invalid JSON: {e}\nRaw: {text[:500]}")
 
 
 class MockAIAdapter(AIAdapter):
-    def __init__(self):
-        self.responses, self._i = [], 0
+    def __init__(self): self.responses, self._i = [], 0
     def add_response(self, r): self.responses.append(r)
     def ask(self, messages, system_prompt=None):
-        if self._i >= len(self.responses): raise RuntimeError("MockAI: no more responses")
+        if self._i >= len(self.responses): raise RuntimeError("MockAI: no more")
         r = self.responses[self._i]; self._i += 1; return r
     def ask_text(self, messages, system_prompt=None):
         return json.dumps(self.ask(messages), ensure_ascii=False)

@@ -1,4 +1,4 @@
-"""LittleAnt V12.1 - Command Executor"""
+"""LittleAnt V13 - Command Executor"""
 from __future__ import annotations
 import subprocess, os, logging
 from littleant.models.project import ExecuteSpec

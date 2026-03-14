@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-LittleAnt V12.1 - Telegram Bot (Dual AI Architecture)
-Improvements: type-driven decomposition, replan recovery, quote support, image/file support
+LittleAnt V13 - Telegram Bot (Cycle Execution Architecture)
+Flow: query → judge → act → query → ... → goal met
+Three-level recovery: L1 command → L2 diagnose → L3 redesign
 """
 from __future__ import annotations
 import json, logging, threading, time, sys, os, traceback, base64
@@ -10,15 +11,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from littleant.i18n import load_language, t
 from littleant.telegram_bot import TelegramBot
-from littleant.ai.adapter import (
-    OpenAICompatibleAdapter, CHAT_PROMPT, EXECUTOR_PROMPT, CLASSIFY_TASK_TYPE_PROMPT
-)
+from littleant.ai.adapter import OpenAICompatibleAdapter, CHAT_PROMPT
 from littleant.core.orchestrator import Orchestrator
-from littleant.core.decomposer import DecompositionError
 from littleant.core.readonly_executor import run_readonly, is_safe_readonly
 from littleant.models.project import Project, ProjectStatus, NodeStatus
 from littleant.storage.json_store import save_project, load_project, list_projects
 from littleant.storage.db_store import init_db, search_tools, search_templates
+from setup import PROVIDERS_BY_ID, test_api_key, save_config as save_setup_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger("littleant")
@@ -37,9 +36,12 @@ class UserSession:
         self.chat_id = cid
         self.current_project_id = None
         self.busy = False
-        self.state = "idle"  # idle/confirming_task/confirming_plan/executing/waiting_user
+        self.state = "idle"
         self.pending_task = None
-        self.pending_task_types = []  # ["query","modify",...]
+        self.pending_provider = None
+        self.confirm_event = threading.Event()
+        self.confirm_result = None
+        self.confirm_commands = None
         self.chat_history = []
 
     def add_user(self, text):
@@ -63,6 +65,7 @@ class UserSession:
         if failed: s += t("project_failed_suffix", count=failed)
         return s
 
+
 sessions = {}
 def get_session(cid):
     if cid not in sessions: sessions[cid] = UserSession(cid)
@@ -76,94 +79,60 @@ CLASSIFY_PROMPT = """You are LittleAnt front-end AI. Classify user intent. Reply
 
 Current state: {state}
 
-If state=confirming_task or confirming_plan:
+If state is confirming_task or confirming_plan:
   {{"intent":"confirm_yes"}} or {{"intent":"confirm_no"}}
 
 Otherwise:
 - {{"intent":"chat","reply":"answer"}} — chat, questions (DEFAULT)
-- {{"intent":"task","task_description":"description"}} — explicit action (needs imperative words)
-- {{"intent":"quick_query","command":"read-only cmd"}} — needs a command to answer
+- {{"intent":"task","task_description":"description"}} — explicit action request with imperative words
+- {{"intent":"quick_query","command":"read-only cmd"}} — needs a specific shell command to answer
 - {{"intent":"query_status"}} — current task progress
 - {{"intent":"query_history","keywords":"kw"}} — past projects
 - {{"intent":"skip_node"}} — "skip" "forget it"
-- {{"intent":"replan_node"}} — "try another way" "change approach" "different method"
 - {{"intent":"retry_project"}} — "restart" "retry"
 - {{"intent":"cancel"}} — "cancel task"
 
-Rules: when unsure choose chat. "skip"/"forget it" → skip_node. "try differently" → replan_node."""
+Rules: when unsure choose chat. "skip"/"forget it" → skip_node."""
 
 def classify(ai, s, text):
-    state_map = {"idle": "idle", "confirming_task": f"confirming task: {s.pending_task}",
-                 "confirming_plan": "confirming plan", "executing": "task running",
-                 "waiting_user": "step failed, waiting decision"}
-    sd = state_map.get(s.state, "idle")
+    sd = {"idle":"idle","confirming_task":f"confirming task: {s.pending_task}",
+          "confirming_plan":"confirming execution plan","executing":"task running",
+          "waiting_user":"step failed, waiting","waiting_api_key":"waiting for API key input"
+          }.get(s.state, "idle")
     if s.current_project_id:
         st = s.status_text()
         if st: sd += f" ({st})"
-    msgs = s.chat_history[-10:] + [{"role": "user", "content": text}]
-    try:
-        return ai.ask(msgs, system_prompt=CLASSIFY_PROMPT.format(state=sd))
-    except:
-        return {"intent": "chat", "reply": t("sorry_error")}
+    msgs = s.chat_history[-10:] + [{"role":"user","content":text}]
+    try: return ai.ask(msgs, system_prompt=CLASSIFY_PROMPT.format(state=sd))
+    except: return {"intent":"chat","reply":t("sorry_error")}
 
 
-def classify_task_type(ai, task_desc):
-    """Ask AI to classify task types: query/create/modify"""
-    try:
-        prompt = CLASSIFY_TASK_TYPE_PROMPT.format(task=task_desc)
-        result = ai.ask([{"role": "user", "content": prompt}])
-        return result.get("types", ["modify"]), result.get("summary", "")
-    except:
-        return ["modify"], ""
-
-
-# ============================================================
-# Helpers
-# ============================================================
 def summarize_results(ai, project):
     results = []
     for nid in sorted(project.nodes.keys()):
         node = project.nodes[nid]
         if not node.is_leaf or node.status != NodeStatus.COMPLETED: continue
         if node.execute_output:
-            stdout = node.execute_output.get("stdout", "")[:500]
+            stdout = node.execute_output.get("stdout","")[:500]
             if stdout.strip(): results.append(f"[{node.name}]\n{stdout.strip()}")
-    if not results: return f"Project \"{project.name}\" completed."
-    req = f"Task \"{project.goal}\" done. Summarize output for user. No technical jargon. Match user's language.\n\n" + "\n\n".join(results[:10])
-    try:
-        return ai.ask_text([{"role": "user", "content": req}], system_prompt="Summarize concisely. Match user's language.")
-    except:
-        return "\n".join(results[:5])
+    if not results: return f"Project completed."
+    req = f"Task \"{project.goal}\" done. Summarize for user. Match their language.\n\n"+"\n\n".join(results[:10])
+    try: return ai.ask_text([{"role":"user","content":req}], system_prompt="Summarize concisely. Match user's language.")
+    except: return "\n".join(results[:5])
 
 
-def plan_project(ai, task, tool_ctx="", tpl_ctx=""):
-    extra = ""
-    if tool_ctx: extra += f"\n\nExisting tools (reuse, don't recreate):\n{tool_ctx}"
-    if tpl_ctx: extra += f"\n\nPast projects:\n{tpl_ctx}"
-    prompt = f'User request: {task}{extra}\n\nGenerate project as typed steps. Each child must have "type":"query" or "create" or "modify".\nPure JSON:\n{{"cmd":"create_project","name":"name","goal":"goal","children":[{{"id":"1","name":"step","type":"query","depends_on":[]}}]}}\n\nOnly do what was asked. JSON only.'
-    return ai.ask([{"role": "user", "content": prompt}], system_prompt=EXECUTOR_PROMPT)
-
-
-def read_file_content(file_path, max_chars=5000):
-    """Read text file content, return empty string for binary."""
+def read_file_content(path, max_chars=5000):
     text_exts = {".txt",".conf",".cfg",".ini",".json",".yaml",".yml",".xml",".sh",".py",".js",".php",".html",".css",".md",".log",".env",".toml"}
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext not in text_exts:
-        return None  # Binary file
+    if os.path.splitext(path)[1].lower() not in text_exts: return None
     try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read(max_chars)
-    except:
-        return None
+        with open(path,"r",encoding="utf-8",errors="replace") as f: return f.read(max_chars)
+    except: return None
 
 
-def encode_image_base64(file_path):
-    """Encode image to base64 for AI vision."""
+def encode_image_base64(path):
     try:
-        with open(file_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    except:
-        return None
+        with open(path,"rb") as f: return base64.b64encode(f.read()).decode("utf-8")
+    except: return None
 
 
 # ============================================================
@@ -171,7 +140,7 @@ def encode_image_base64(file_path):
 # ============================================================
 def main():
     config = load_config()
-    load_language(config.get("language", "en"))
+    load_language(config.get("language","en"))
     init_db()
 
     ai = OpenAICompatibleAdapter(
@@ -179,11 +148,11 @@ def main():
     bot = TelegramBot(config["telegram_token"])
     orch = Orchestrator(ai=ai)
 
-    lang = config.get("language", "en")
+    lang = config.get("language","en")
     if lang == "zh":
-        bot.set_menu_commands([("help","查看帮助"),("status","任务进度"),("cancel","取消任务")])
+        bot.set_menu_commands([("help","查看帮助"),("status","任务进度"),("model","切换AI模型"),("cancel","取消任务")])
     else:
-        bot.set_menu_commands([("help","Show help"),("status","Task progress"),("cancel","Cancel task")])
+        bot.set_menu_commands([("help","Show help"),("status","Task progress"),("model","Switch AI model"),("cancel","Cancel task")])
 
     # ======== Commands ========
     @bot.on_command("start")
@@ -196,175 +165,183 @@ def main():
     def cmd_status(msg):
         s = get_session(msg["chat"]["id"])
         st = s.status_text()
-        bot.send_message(msg["chat"]["id"], t("task_status", status=st) if st else t("no_task"))
+        bot.send_message(msg["chat"]["id"], t("task_status",status=st) if st else t("no_task"))
     @bot.on_command("cancel")
     def cmd_cancel(msg):
         s = get_session(msg["chat"]["id"])
         if s.current_project_id:
             p = load_project(s.current_project_id)
-            if p: p.status = ProjectStatus.ABORTED; save_project(p)
-            s.current_project_id = None; s.busy = False; s.state = "idle"; s.pending_task = None
+            if p: p.status=ProjectStatus.ABORTED; save_project(p)
+            s.current_project_id=None; s.busy=False; s.state="idle"; s.pending_task=None
+            s.confirm_event.set()  # unblock any waiting confirm
             bot.send_message(msg["chat"]["id"], t("task_cancelled"))
         else:
             bot.send_message(msg["chat"]["id"], t("no_task"))
+    @bot.on_command("model")
+    def cmd_model(msg):
+        cid = msg["chat"]["id"]
+        current = config.get("ai_provider","?")
+        buttons = []
+        for pid, info in PROVIDERS_BY_ID.items():
+            marker = " ✅" if pid == current else ""
+            has_key = bool(config.get("providers",{}).get(pid,{}).get("api_key"))
+            ks = " (key saved)" if has_key else ""
+            buttons.append([{"text":f"{info['name']}{marker}{ks}","callback_data":f"switch_{pid}"}])
+        bot.send_message(cid, f"Current AI: {current}\nSwitch to:", reply_markup={"inline_keyboard":buttons})
 
     # ======== Message handling ========
     @bot.on_message
     def handle_message(msg):
         cid = msg["chat"]["id"]
-        text = msg.get("text", "").strip()
+        text = msg.get("text","").strip()
         s = get_session(cid)
         bot.send_typing(cid)
 
-        # Build context with reply/quote
-        reply_ctx = msg.get("_reply_context", "")
-        msg_type = msg.get("_type", "text")
+        # API key input for model switching
+        if s.state == "waiting_api_key" and s.pending_provider and text:
+            prov = PROVIDERS_BY_ID.get(s.pending_provider)
+            if not prov: bot.send_message(cid,"Invalid provider."); s.state="idle"; return
+            if len(text) < 10: bot.send_message(cid,"API key too short. Try again or /cancel."); return
+            bot.send_message(cid, f"Testing {prov['name']} API key...")
+            ok, err = test_api_key(prov["base_url"], prov["model"], text)
+            if ok:
+                if "providers" not in config: config["providers"] = {}
+                config["providers"][s.pending_provider] = {"api_key":text,"base_url":prov["base_url"],"model":prov["model"]}
+                config["ai_provider"]=s.pending_provider; config["ai_api_key"]=text
+                config["ai_base_url"]=prov["base_url"]; config["ai_model"]=prov["model"]
+                save_setup_config(config)
+                ai.api_key=text; ai.base_url=prov["base_url"]; ai.model=prov["model"]
+                bot.send_message(cid, f"✅ Switched to {prov['name']}!")
+            else:
+                bot.send_message(cid, f"❌ API key invalid: {err}\nTry again or /cancel.")
+                return
+            s.state="idle"; s.pending_provider=None; return
 
-        # Handle image messages
+        # Reply/quote context
+        reply_ctx = msg.get("_reply_context","")
+        msg_type = msg.get("_type","text")
+
+        # Image
         if msg_type == "photo":
-            file_path = msg.get("_file_path")
-            caption = msg.get("_caption", "")
-            if file_path:
-                img_b64 = encode_image_base64(file_path)
-                if img_b64:
-                    # Send to AI with vision
-                    user_text = caption or "What's in this image?"
-                    if reply_ctx:
-                        user_text = f"[Quoted: {reply_ctx[:200]}]\n{user_text}"
+            fp = msg.get("_file_path"); cap = msg.get("_caption","")
+            if fp:
+                b64 = encode_image_base64(fp)
+                if b64:
+                    ut = cap or "What's in this image?"
+                    if reply_ctx: ut = f"[Quoted: {reply_ctx[:200]}]\n{ut}"
                     try:
-                        # Use vision-capable message format
-                        vision_msg = [{"role": "user", "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
-                            {"type": "text", "text": user_text}
-                        ]}]
-                        reply = ai.ask_text(vision_msg, system_prompt=CHAT_PROMPT)
-                    except Exception as e:
-                        reply = f"Cannot process image: {str(e)[:200]}"
-                    s.add_user(f"[image] {caption}")
-                    bot.send_message(cid, reply); s.add_ai(reply)
-                    return
+                        r = ai.ask_text([{"role":"user","content":[
+                            {"type":"image_url","image_url":{"url":f"data:image/jpeg;base64,{b64}"}},
+                            {"type":"text","text":ut}]}], system_prompt=CHAT_PROMPT)
+                    except Exception as e: r = f"Cannot process image: {str(e)[:200]}"
+                    s.add_user(f"[image] {cap}"); bot.send_message(cid, r); s.add_ai(r); return
 
-        # Handle file messages
+        # File
         if msg_type == "document":
-            file_path = msg.get("_file_path")
-            file_name = msg.get("_file_name", "unknown")
-            caption = msg.get("_caption", "")
-            if file_path:
-                content = read_file_content(file_path)
+            fp = msg.get("_file_path"); fn = msg.get("_file_name","?"); cap = msg.get("_caption","")
+            if fp:
+                content = read_file_content(fp)
                 if content:
-                    user_text = caption or f"Here's the content of {file_name}:"
-                    if reply_ctx:
-                        user_text = f"[Quoted: {reply_ctx[:200]}]\n{user_text}"
-                    ctx = f"{user_text}\n\n--- File: {file_name} ---\n{content[:4000]}"
+                    ctx = f"{cap or f'File {fn}:'}\n\n--- {fn} ---\n{content[:4000]}"
                     s.add_user(ctx)
-                    msgs = s.chat_history[-10:]
-                    try:
-                        reply = ai.ask_text(msgs, system_prompt=CHAT_PROMPT)
-                    except:
-                        reply = t("sorry_error")
-                    bot.send_message(cid, reply); s.add_ai(reply)
+                    try: r = ai.ask_text(s.chat_history[-10:], system_prompt=CHAT_PROMPT)
+                    except: r = t("sorry_error")
+                    bot.send_message(cid, r); s.add_ai(r)
                 else:
-                    bot.send_message(cid, f"File {file_name} saved to server at {file_path}")
-                    s.add_user(f"[file: {file_name}]")
+                    bot.send_message(cid, f"File {fn} saved to {fp}")
+                    s.add_user(f"[file: {fn}]")
                 return
 
-        if not text:
-            return
-
-        # Prepend quote context to user message for AI
-        full_text = text
-        if reply_ctx:
-            full_text = f"[Quoted: {reply_ctx[:300]}]\n{text}"
+        if not text: return
+        full_text = f"[Quoted: {reply_ctx[:300]}]\n{text}" if reply_ctx else text
         s.add_user(full_text)
 
         result = classify(ai, s, full_text)
-        intent = result.get("intent", "chat")
+        intent = result.get("intent","chat")
         logger.info(f"[{cid}] intent={intent} state={s.state}")
 
-        # ---- Chat ----
+        # Chat
         if intent == "chat":
-            reply = result.get("reply") or t("sorry_error")
-            bot.send_message(cid, reply); s.add_ai(reply)
+            r = result.get("reply") or t("sorry_error")
+            bot.send_message(cid, r); s.add_ai(r)
 
-        # ---- Quick query (front-end AI read-only) ----
+        # Quick query
         elif intent == "quick_query":
-            cmd = result.get("command", "")
-            safe, reason = is_safe_readonly(cmd) if cmd else (False, "empty")
+            cmd = result.get("command","")
+            safe, reason = is_safe_readonly(cmd) if cmd else (False,"empty")
             if not safe:
-                bot.send_message(cid, t("readonly_denied", reason=reason)); return
-            r = run_readonly(cmd)
-            if r["success"]:
-                try: reply = ai.ask_text([{"role":"user","content":f"Command `{cmd}` output:\n{r['output'][:3000]}\nSummarize. Match user's language."}], system_prompt=CHAT_PROMPT)
-                except: reply = r["output"][:2000]
-            else: reply = t("query_failed", error=r["error"])
-            bot.send_message(cid, reply); s.add_ai(reply)
+                try: r = ai.ask_text([{"role":"user","content":f"User asked: {full_text}\nCan't run as quick query. Suggest creating a task. Be natural. Match language."}], system_prompt=CHAT_PROMPT)
+                except: r = "This needs a task to execute. Say 'execute task: ...' to start."
+                bot.send_message(cid, r); s.add_ai(r); return
+            ro = run_readonly(cmd)
+            if ro["success"]:
+                try: r = ai.ask_text([{"role":"user","content":f"`{cmd}` output:\n{ro['output'][:3000]}\nSummarize. Match language."}], system_prompt=CHAT_PROMPT)
+                except: r = ro["output"][:2000]
+            else: r = t("query_failed", error=ro["error"])
+            bot.send_message(cid, r); s.add_ai(r)
 
-        # ---- Query history ----
+        # Query history
         elif intent == "query_history":
-            kw = result.get("keywords", "")
+            kw = result.get("keywords","")
             projects = list_projects()
-            if not projects: reply = t("no_projects")
+            if not projects: r = t("no_projects")
             else:
                 matched = [p for p in projects if any(k in p["name"] for k in kw.split())] if kw else projects[:5]
                 if not matched: matched = projects[:5]
                 info = "\n".join([f"- {p['name']} [{p['status']}]" for p in matched[:10]])
-                try: reply = ai.ask_text([{"role":"user","content":f"Past projects:\n{info}\nSummarize. Match user's language."}], system_prompt=CHAT_PROMPT)
-                except: reply = info
-            bot.send_message(cid, reply); s.add_ai(reply)
+                try: r = ai.ask_text([{"role":"user","content":f"Past projects:\n{info}\nSummarize. Match language."}], system_prompt=CHAT_PROMPT)
+                except: r = info
+            bot.send_message(cid, r); s.add_ai(r)
 
-        # ---- Query status ----
+        # Query status
         elif intent == "query_status":
             st = s.status_text()
-            reply = t("task_status", status=st) if st else t("no_task")
-            bot.send_message(cid, reply); s.add_ai(reply)
+            bot.send_message(cid, t("task_status",status=st) if st else t("no_task"))
 
-        # ---- Task ----
+        # Task
         elif intent == "task":
-            if s.busy:
-                bot.send_message(cid, t("busy")); return
-            task_desc = result.get("task_description", text)
+            if s.busy: bot.send_message(cid, t("busy")); return
+            td = result.get("task_description", text)
 
-            # Classify task types
-            types, summary = classify_task_type(ai, task_desc)
-            s.pending_task = task_desc
-            s.pending_task_types = types
+            # Phase 1: classify
+            types, summary = orch.classify_task(td)
+            s.pending_task = td
 
-            # Pure query tasks skip confirmation
             if types == ["query"]:
-                s.state = "idle"
-                s.pending_task = None
-                reply = t("planning", task=task_desc)
-                bot.send_message(cid, reply); s.add_ai(reply)
-                threading.Thread(target=_plan_and_execute_query, args=(bot,ai,orch,s,task_desc), daemon=True).start()
+                # Pure query → no confirmation needed
+                r = t("planning", task=td)
+                bot.send_message(cid, r); s.add_ai(r)
+                threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types,False), daemon=True).start()
             else:
-                # Tasks with create/modify need confirmation
+                # Has create/modify → confirm first
                 s.state = "confirming_task"
-                reply = t("confirm_task", task=task_desc)
-                bot.send_message(cid, reply, reply_markup={"inline_keyboard":[[
-                    {"text": t("confirm_task_yes_btn"), "callback_data": "confirm_task_yes"},
-                    {"text": t("confirm_task_no_btn"), "callback_data": "confirm_task_no"}]]})
-                s.add_ai(reply)
+                r = t("confirm_task", task=td)
+                bot.send_message(cid, r, reply_markup={"inline_keyboard":[[
+                    {"text":t("confirm_task_yes_btn"),"callback_data":"confirm_task_yes"},
+                    {"text":t("confirm_task_no_btn"),"callback_data":"confirm_task_no"}]]})
+                s.add_ai(r)
 
-        # ---- Confirm yes ----
+        # Confirm yes
         elif intent == "confirm_yes":
             if s.state == "confirming_task" and s.pending_task:
                 s.state = "idle"; td = s.pending_task; s.pending_task = None
-                bot.send_message(cid, t("planning", task=td)); s.add_ai(t("planning", task=td))
-                threading.Thread(target=_plan_and_confirm, args=(bot,ai,orch,s,td), daemon=True).start()
-            elif s.state == "confirming_plan" and s.current_project_id:
-                s.state = "idle"; p = load_project(s.current_project_id)
-                if p:
-                    bot.send_message(cid, t("exec_start")); s.add_ai(t("exec_start"))
-                    threading.Thread(target=_exec, args=(bot,ai,orch,s,p), daemon=True).start()
+                types, _ = orch.classify_task(td)
+                r = t("planning", task=td)
+                bot.send_message(cid, r); s.add_ai(r)
+                threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types,True), daemon=True).start()
+            elif s.state == "confirming_plan":
+                s.confirm_result = True; s.confirm_event.set()
             else: bot.send_message(cid, t("no_confirm_pending"))
 
-        # ---- Confirm no ----
+        # Confirm no
         elif intent == "confirm_no":
-            if s.state in ("confirming_task","confirming_plan"):
-                s.state = "idle"; s.pending_task = None
+            if s.state == "confirming_task":
+                s.state="idle"; s.pending_task=None
+            elif s.state == "confirming_plan":
+                s.confirm_result = False; s.confirm_event.set()
             bot.send_message(cid, t("confirm_no_reply")); s.add_ai(t("confirm_no_reply"))
 
-        # ---- Skip node ----
+        # Skip
         elif intent == "skip_node":
             if s.current_project_id:
                 from littleant.core.recovery import remove_node
@@ -373,53 +350,27 @@ def main():
                     removed = [nid for nid in list(p.nodes.keys()) if p.nodes[nid].status == NodeStatus.FAILED]
                     for nid in removed: remove_node(p, nid)
                     save_project(p)
-                    if removed:
-                        bot.send_message(cid, t("skipped"))
-                        if not s.busy: threading.Thread(target=_exec, args=(bot,ai,orch,s,p), daemon=True).start()
-                    else: bot.send_message(cid, t("no_skip_needed"))
+                    bot.send_message(cid, t("skipped") if removed else t("no_skip_needed"))
             else: bot.send_message(cid, t("no_skip_needed"))
 
-        # ---- Replan node ----
-        elif intent == "replan_node":
-            if s.current_project_id:
-                from littleant.core.recovery import replan_branch
-                p = load_project(s.current_project_id)
-                if p:
-                    # Find failed nodes and replan their parent
-                    replanned = False
-                    for nid in list(p.nodes.keys()):
-                        n = p.nodes.get(nid)
-                        if n and n.status == NodeStatus.FAILED and n.parent_id:
-                            if replan_branch(p, n.parent_id, ai, "user requested replan"):
-                                replanned = True
-                                break
-                    if replanned:
-                        save_project(p)
-                        bot.send_message(cid, "OK, trying a different approach...")
-                        if not s.busy:
-                            threading.Thread(target=_replan_and_exec, args=(bot,ai,orch,s,p), daemon=True).start()
-                    else:
-                        bot.send_message(cid, "No failed steps to replan.")
-            else:
-                bot.send_message(cid, "No active project.")
-
-        # ---- Retry project ----
+        # Retry
         elif intent == "retry_project":
             if s.current_project_id and not s.busy:
                 p = load_project(s.current_project_id)
                 if p:
                     for n in p.nodes.values():
-                        if n.status == NodeStatus.FAILED: n.status = NodeStatus.READY; n.retry_count=0; n.modify_count=0
-                    p.consecutive_failures = 0; save_project(p)
+                        if n.status == NodeStatus.FAILED: n.status=NodeStatus.READY; n.retry_count=0; n.modify_count=0
+                    p.consecutive_failures=0; save_project(p)
                     bot.send_message(cid, t("retrying"))
-                    threading.Thread(target=_exec, args=(bot,ai,orch,s,p), daemon=True).start()
+                    # Re-run phased execution
+                    threading.Thread(target=_resume_task, args=(bot,ai,orch,s,p), daemon=True).start()
                 else: bot.send_message(cid, t("project_not_found"))
             else: bot.send_message(cid, t("no_retry"))
 
         elif intent == "cancel": cmd_cancel(msg)
         else:
-            reply = result.get("reply") or t("unknown_msg")
-            bot.send_message(cid, reply); s.add_ai(reply)
+            r = result.get("reply") or t("unknown_msg")
+            bot.send_message(cid, r); s.add_ai(r)
 
     # ======== Callbacks ========
     @bot.on_callback
@@ -428,100 +379,125 @@ def main():
         s = get_session(cid)
         if data == "confirm_task_yes" and s.state == "confirming_task" and s.pending_task:
             s.state="idle"; td=s.pending_task; s.pending_task=None
+            types, _ = orch.classify_task(td)
             bot.send_message(cid, t("planning", task=td))
-            threading.Thread(target=_plan_and_confirm, args=(bot,ai,orch,s,td), daemon=True).start()
+            threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types,True), daemon=True).start()
         elif data == "confirm_task_no":
             s.state="idle"; s.pending_task=None; bot.send_message(cid, t("confirm_no_reply"))
-        elif data == "approve_plan" and s.state == "confirming_plan" and s.current_project_id:
-            s.state="idle"; p=load_project(s.current_project_id)
-            if p: bot.send_message(cid, t("exec_start")); threading.Thread(target=_exec, args=(bot,ai,orch,s,p), daemon=True).start()
+        elif data == "approve_plan":
+            s.confirm_result = True; s.confirm_event.set()
         elif data == "reject_plan":
-            s.state="idle"; s.current_project_id=None; bot.send_message(cid, t("plan_rejected"))
+            s.confirm_result = False; s.confirm_event.set()
+        elif data.startswith("switch_"):
+            pid = data.replace("switch_","")
+            info = PROVIDERS_BY_ID.get(pid)
+            if not info: return
+            saved = config.get("providers",{}).get(pid,{}).get("api_key")
+            if saved:
+                config["ai_provider"]=pid; config["ai_api_key"]=saved
+                config["ai_base_url"]=info["base_url"]; config["ai_model"]=info["model"]
+                save_setup_config(config)
+                ai.api_key=saved; ai.base_url=info["base_url"]; ai.model=info["model"]
+                bot.send_message(cid, f"✅ Switched to {info['name']}!")
+            else:
+                s.state="waiting_api_key"; s.pending_provider=pid
+                bot.send_message(cid, f"Please send me your {info['name']} API key:")
 
-    # ======== Background tasks ========
+    # ======== Background task runner ========
 
-    def _plan_and_execute_query(bot, ai, orch, s, task_desc):
-        """Fast track for pure query tasks — no user confirmation needed."""
-        cid = s.chat_id; s.busy = True
-        try:
-            kws = [k for k in task_desc.split() if len(k) > 1][:5]
-            tool_ctx = "\n".join([f"- {x['name']}: {x.get('description','')} (path:{x['path']})" for x in search_tools(kws,5)]) if kws else ""
-            plan = plan_project(ai, task_desc, tool_ctx)
-            project = orch.create_project(name=plan.get("name",task_desc), goal=plan.get("goal",task_desc), initial_children=plan.get("children",[]))
-            s.current_project_id = project.id
-            orch.decompose(project)
-            # Execute directly (no confirmation for queries)
-            result = orch.execute_with_replan(project)
-            summary = summarize_results(ai, project)
-            bot.send_message(cid, t("exec_done", summary=summary)); s.add_ai(summary)
-        except Exception as e:
-            logger.error(traceback.format_exc())
-            bot.send_message(cid, t("planning_error", error=str(e)[:200]))
-        finally: s.busy = False; s.state = "idle"
-
-    def _plan_and_confirm(bot, ai, orch, s, task_desc):
-        """Plan and show to user for confirmation."""
+    def _run_task(bot, ai, orch, s, task_desc, types, needs_confirm):
+        """Cycle execution: classify → design → [query → judge → act] cycles."""
         cid = s.chat_id
+        s.busy = True; s.state = "executing"
         try:
-            kws = [k for k in task_desc.split() if len(k) > 1][:5]
-            tool_ctx = "\n".join([f"- {x['name']}: {x.get('description','')} (path:{x['path']}, usage:{x['usage']})" for x in search_tools(kws,5)]) if kws else ""
-            tpl_ctx = "\n".join([f"- {x['name']} ({x['nodes']} nodes, {x['date']})" for x in search_templates(kws,3)]) if kws else ""
-            plan = plan_project(ai, task_desc, tool_ctx, tpl_ctx)
-            project = orch.create_project(name=plan.get("name",task_desc), goal=plan.get("goal",task_desc), initial_children=plan.get("children",[]))
+            # Phase 2: Design steps
+            task_brief = orch.design_steps(task_desc, types)
+
+            # Phase 2b: Think steps (AI reasoning, no commands)
+            task_brief = orch.do_think_steps(task_brief)
+
+            # Show plan to user
+            steps = task_brief.get("planned_steps", [])
+            step_lines = []
+            for step in steps:
+                dep = f" (after {step['depends_on']})" if step.get("depends_on") else ""
+                done = f" → {step['conclusion'][:80]}" if step.get("conclusion") else ""
+                step_lines.append(f"  {step['step']}. [{step['type']}] {step['name']}{dep}{done}")
+            bot.send_message(cid, f"📋 Plan ({len(steps)} steps):\n" + "\n".join(step_lines))
+
+            # Create project
+            project = orch.create_project(task_brief)
             s.current_project_id = project.id
-            orch.decompose(project)
 
-            leaves = sorted([n for n in project.nodes.values() if n.is_leaf], key=lambda n: n.id)
-            lines = [t("plan_header", name=project.name, count=len(leaves)), ""]
-            for leaf in leaves[:12]:
-                cs = ""
-                if leaf.execute and leaf.execute.command:
-                    c = leaf.execute.command; cs = f"\n  → {c[:50]}{'...' if len(c)>50 else ''}"
-                lines.append(f"• {leaf.name}{cs}")
-            if len(leaves) > 12: lines.append(t("plan_more", count=len(leaves)-12))
-            lines.append(t("plan_confirm"))
-            s.state = "confirming_plan"
-            bot.send_message(cid, "\n".join(lines), reply_markup={"inline_keyboard":[[
-                {"text": t("plan_approve_btn"), "callback_data": "approve_plan"},
-                {"text": t("plan_reject_btn"), "callback_data": "reject_plan"}]]})
-        except Exception as e:
-            s.state="idle"; logger.error(traceback.format_exc())
-            bot.send_message(cid, t("planning_error", error=str(e)[:200]))
-            s.current_project_id = None
+            # Confirm callback for create/modify actions
+            def on_confirm(plan_text):
+                s.state = "confirming_plan"
+                s.confirm_event.clear()
+                s.confirm_result = None
+                bot.send_message(cid, f"📋 Ready to execute:\n\n{plan_text}\n\n{t('plan_confirm')}",
+                    reply_markup={"inline_keyboard":[[
+                        {"text":t("plan_approve_btn"),"callback_data":"approve_plan"},
+                        {"text":t("plan_reject_btn"),"callback_data":"reject_plan"}]]})
+                s.confirm_event.wait(timeout=300)
+                s.state = "executing"
+                return s.confirm_result == True
 
-    def _exec(bot, ai, orch, s, project):
-        """Execute project with automatic replan."""
-        cid = s.chat_id; s.busy = True; s.state = "executing"
-        try:
-            result = orch.execute_with_replan(project)
+            def on_status(message):
+                bot.send_message(cid, f"⏳ {message}")
+
+            # Main cycle: query → judge → act → query → ... → goal met
+            result = orch.run_cycle(
+                project,
+                on_confirm=on_confirm if needs_confirm else None,
+                on_status=on_status,
+            )
+
             if result == "completed":
                 summary = summarize_results(ai, project)
-                bot.send_message(cid, t("exec_done", summary=summary)); s.add_ai(summary)
-            elif result == "abort" or result == "failed":
-                bot.send_message(cid, t("exec_failed"))
+                bot.send_message(cid, t("exec_done", summary=summary))
+                s.add_ai(summary)
+            elif result == "aborted":
+                bot.send_message(cid, t("plan_rejected"))
             elif result == "waiting_user":
-                # Find the failed node
                 for n in project.nodes.values():
                     if n.status == NodeStatus.FAILED:
                         det = n.verify_output.get("detail","") if n.verify_output else ""
                         bot.send_message(cid, t("node_problem", name=n.name, detail=det))
                         break
                 s.state = "waiting_user"
+            else:
+                bot.send_message(cid, t("exec_failed"))
+
         except Exception as e:
             logger.error(traceback.format_exc())
-            bot.send_message(cid, t("exec_error", error=str(e)[:200]))
+            bot.send_message(cid, t("planning_error", error=str(e)[:200]))
         finally:
             if s.state != "waiting_user":
                 s.busy = False; s.state = "idle"
             else:
                 s.busy = False
 
-    def _replan_and_exec(bot, ai, orch, s, project):
-        """Re-decompose after replan, then execute."""
-        cid = s.chat_id; s.busy = True; s.state = "executing"
+    def _resume_task(bot, ai, orch, s, project):
+        """Resume: re-enter the cycle from where we left off."""
+        cid = s.chat_id
+        s.busy = True; s.state = "executing"
         try:
-            orch.decompose(project)
-            result = orch.execute_with_replan(project)
+            def on_confirm(plan_text):
+                s.state = "confirming_plan"
+                s.confirm_event.clear(); s.confirm_result = None
+                bot.send_message(cid, f"📋 Resume execution:\n\n{plan_text}\n\n{t('plan_confirm')}",
+                    reply_markup={"inline_keyboard":[[
+                        {"text":t("plan_approve_btn"),"callback_data":"approve_plan"},
+                        {"text":t("plan_reject_btn"),"callback_data":"reject_plan"}]]})
+                s.confirm_event.wait(timeout=300)
+                s.state = "executing"
+                return s.confirm_result == True
+
+            def on_status(msg):
+                bot.send_message(cid, f"⏳ {msg}")
+
+            result = orch.run_cycle(project, on_confirm=on_confirm, on_status=on_status)
+
             if result == "completed":
                 summary = summarize_results(ai, project)
                 bot.send_message(cid, t("exec_done", summary=summary)); s.add_ai(summary)
@@ -529,8 +505,7 @@ def main():
                 for n in project.nodes.values():
                     if n.status == NodeStatus.FAILED:
                         det = n.verify_output.get("detail","") if n.verify_output else ""
-                        bot.send_message(cid, t("node_problem", name=n.name, detail=det))
-                        break
+                        bot.send_message(cid, t("node_problem", name=n.name, detail=det)); break
                 s.state = "waiting_user"
             else:
                 bot.send_message(cid, t("exec_failed"))
@@ -538,12 +513,12 @@ def main():
             logger.error(traceback.format_exc())
             bot.send_message(cid, t("exec_error", error=str(e)[:200]))
         finally:
-            if s.state != "waiting_user": s.busy = False; s.state = "idle"
-            else: s.busy = False
+            if s.state != "waiting_user": s.busy=False; s.state="idle"
+            else: s.busy=False
 
     # ======== Start ========
     logger.info("=" * 50)
-    logger.info("LittleAnt V12.1 - Dual AI Architecture")
+    logger.info("LittleAnt V13 - Cycle Execution Architecture")
     logger.info(f"Language: {config.get('language','en')} | AI: {config.get('ai_provider','?')}")
     logger.info("=" * 50)
     bot.start_polling()

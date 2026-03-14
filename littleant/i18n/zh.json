@@ -1,6 +1,6 @@
 {
   "bot_welcome": "👋 {name}，我是 LittleAnt AI 管家！\n\n跟我聊天或让我帮你在服务器上执行任务。\n说「帮我装xxx」开始任务。\n\n/status - 任务进度\n/cancel - 取消任务",
-  "bot_help": "🐜 LittleAnt V12.1\n\n聊天 → 直接发消息\n查状态 → 「crontab配了什么」「磁盘还剩多少」\n执行任务 → 「帮我装个nginx」\n\n/status - 进度\n/cancel - 取消",
+  "bot_help": "🐜 LittleAnt V13\n\n聊天 → 直接发消息\n查状态 → 「crontab配了什么」「磁盘还剩多少」\n执行任务 → 「帮我装个nginx」\n\n/status - 进度\n/cancel - 取消",
   "no_task": "📭 没有任务",
   "task_cancelled": "🛑 已取消",
   "task_status": "📊 {status}",

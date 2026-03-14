@@ -1,5 +1,5 @@
 """
-LittleAnt V12.1 - Project & Node Models
+LittleAnt V13 - Project & Node Models
 Project tree and node state machine.
 """
 from __future__ import annotations
@@ -171,6 +171,7 @@ class Project:
     root_children: list[str] = field(default_factory=list)  # top-level node ids
     ai_call_count: int = 0
     consecutive_failures: int = 0
+    task_brief: dict = field(default_factory=dict)  # Task specification document
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -227,6 +228,7 @@ class Project:
             "root_children": self.root_children,
             "ai_call_count": self.ai_call_count,
             "consecutive_failures": self.consecutive_failures,
+            "task_brief": self.task_brief,
             "created_at": self.created_at,
             "nodes": {nid: n.to_dict() for nid, n in self.nodes.items()},
         }
@@ -241,6 +243,7 @@ class Project:
             root_children=d.get("root_children", []),
             ai_call_count=d.get("ai_call_count", 0),
             consecutive_failures=d.get("consecutive_failures", 0),
+            task_brief=d.get("task_brief", {}),
             created_at=d.get("created_at", time.time()),
         )
         for nid, nd in d.get("nodes", {}).items():

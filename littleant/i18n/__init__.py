@@ -1,4 +1,4 @@
-"""LittleAnt V12.1 - Internationalization"""
+"""LittleAnt V13 - Internationalization"""
 import json, os
 
 _lang = "en"

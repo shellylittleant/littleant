@@ -1,5 +1,5 @@
 """
-LittleAnt V12.1 - Database Storage
+LittleAnt V13 - Database Storage
 Execution logs in DB (streaming data). Template library in DB (needs search).
 """
 from __future__ import annotations
@@ -113,7 +113,7 @@ def save_template(template_id: str, name: str, keywords: list[str],
 
 
 def search_templates(keywords: list[str], limit: int = 10) -> list[dict]:
-    """V12.1 Step 1: Return snapshot list"""
+    """V13 Step 1: Return snapshot list"""
     conn = _get_conn()
     conditions = " OR ".join(["keywords LIKE ?" for _ in keywords])
     params = [f"%{kw}%" for kw in keywords]
@@ -127,7 +127,7 @@ def search_templates(keywords: list[str], limit: int = 10) -> list[dict]:
 
 
 def get_template_tree(template_id: str) -> dict | None:
-    """V12.1 Step 2: Return template tree"""
+    """V13 Step 2: Return template tree"""
     conn = _get_conn()
     row = conn.execute("SELECT tree_json FROM templates WHERE id=?", (template_id,)).fetchone()
     conn.close()
@@ -137,7 +137,7 @@ def get_template_tree(template_id: str) -> dict | None:
 
 
 def get_template_nodes(template_id: str, scope: list[str] = None) -> dict | None:
-    """V12.1 Step 3: Return branch commands"""
+    """V13 Step 3: Return branch commands"""
     conn = _get_conn()
     row = conn.execute("SELECT nodes_json FROM templates WHERE id=?", (template_id,)).fetchone()
     conn.close()

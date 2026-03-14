@@ -1,4 +1,4 @@
-"""LittleAnt V12.1 - System Configuration"""
+"""LittleAnt V13 - System Configuration"""
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,6 +14,8 @@ MAX_NODE_MODIFICATIONS = 2
 MAX_CONSECUTIVE_FAILURES = 5
 MAX_LEAF_NODES = 50
 MAX_REPLAN_PER_PARENT = 3
+MAX_L2_ATTEMPTS = 3
+MAX_L3_ATTEMPTS = 2
 
 ALLOWED_EXECUTE_TYPES = ["run_shell", "write_file", "make_dir", "read_file", "http_request"]
 ALLOWED_VERIFY_TYPES = [

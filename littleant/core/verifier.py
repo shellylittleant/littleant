@@ -1,4 +1,4 @@
-"""LittleAnt V12.1 - Mechanical Verifiers (8 types, zero AI tokens)"""
+"""LittleAnt V13 - Mechanical Verifiers (8 types, zero AI tokens)"""
 from __future__ import annotations
 import subprocess, os, socket, logging
 from littleant.models.project import VerifySpec
