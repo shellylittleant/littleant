@@ -1,69 +1,111 @@
-# 🐜 LittleAnt V12.1
+<p align="center">
+  <h1 align="center">🐜 LittleAnt V12.1</h1>
+  <p align="center"><strong>AI Intent Execution System</strong></p>
+  <p align="center">
+    Compile natural language intent into executable, verifiable, recoverable server actions — via recursive decomposition.
+  </p>
+  <p align="center">
+    <a href="https://github.com/shellylittleant/littleant/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.10+-green.svg" alt="Python 3.10+"></a>
+    <a href="https://github.com/shellylittleant/littleant/releases"><img src="https://img.shields.io/github/v/release/shellylittleant/littleant" alt="Release"></a>
+    <a href="https://github.com/shellylittleant/littleant/stargazers"><img src="https://img.shields.io/github/stars/shellylittleant/littleant?style=social" alt="Stars"></a>
+  </p>
+</p>
 
-**AI Intent Execution System** — Compile natural language intent into executable, verifiable, recoverable real-world actions via recursive decomposition.
+---
 
-LittleAnt is an AI butler that lives on your server. You talk to it through Telegram, and it executes tasks on your server autonomously — installing software, configuring services, writing scripts, and more.
+LittleAnt is an AI butler that lives on your server. You talk to it through Telegram, and it autonomously executes tasks — installing software, configuring services, writing scripts, monitoring systems, and more. Zero third-party Python dependencies.
+
+<!-- 
+TODO: Replace with your Telegram screenshot
+![LittleAnt Demo1](docs/1.jpg)
+![LittleAnt Demo2](docs/2.jpg)
+![LittleAnt Demo3](docs/3.jpg)
+-->
+
+## Why LittleAnt?
+
+Most AI agent frameworks are **chat-first**: they generate text and hope it's useful. LittleAnt is **execution-first**: every output is a real command that runs on your server, gets mechanically verified, and recovers autonomously on failure.
+
+| | Chat-first Agents | LittleAnt |
+|---|---|---|
+| **Output** | Text / suggestions | Executable shell commands |
+| **Verification** | None or AI-based | Mechanical (zero AI tokens) |
+| **Failure handling** | Crash or ask user | AI self-recovers (retry / modify / skip) |
+| **Task decomposition** | One-shot plan | Recursive, layer by layer |
+| **Transparency** | Black box | Full execution tree, every step logged |
+| **Dependencies** | pip install dozens of packages | Zero. Pure Python stdlib |
 
 ## Architecture
 
 ```
-User ←→ Front-end AI (chat, read-only) ←→ Program ←→ Back-end AI (execute, read-write)
+┌─────────────┐     Natural Language     ┌──────────────────┐
+│    User      │◄──────────────────────►│  Front-end AI     │
+│  (Telegram)  │                         │  (Chat, ReadOnly) │
+└─────────────┘                         └────────┬─────────┘
+                                                 │ DB queries
+                                                 │ Read-only commands
+                                                 │ Initiate tasks
+                                        ┌────────▼─────────┐
+                                        │   LittleAnt Core  │
+                                        │   (Orchestrator)  │
+                                        └────────┬─────────┘
+                                                 │ JSON Protocol
+                                        ┌────────▼─────────┐
+                                        │  Back-end AI      │
+                                        │  (Execute, R/W)   │
+                                        └──────────────────┘
 ```
 
-- **Front-end AI**: Chats with users, understands intent, has memory (20-turn context), can run read-only commands, reports results in plain language
-- **Back-end AI**: Only communicates with the program via JSON, decomposes tasks recursively, generates executable commands, handles failures autonomously
-- **Program**: Executes commands, performs mechanical verification, persists state, manages the task lifecycle
+**Front-end AI** — Chats with users, has memory (20-turn context), runs read-only commands (`free -h`, `crontab -l`, `systemctl status`), reports results in plain language. Cannot modify anything.
 
-## Key Features
+**Back-end AI** — Communicates only via JSON. Decomposes tasks recursively, generates executable commands, handles failures autonomously. Full read-write access.
 
-- **Recursive Decomposition**: Tasks are broken down layer by layer until every branch becomes an executable command
-- **Mechanical Verification**: All verification is done by the program (zero AI tokens). AI only intervenes on confirmed failures
-- **Autonomous Recovery**: Back-end AI handles failures (retry/modify/skip) on its own. Only escalates to user when safety limits are hit
-- **Tool Library**: Successfully completed tasks are automatically saved. Next time a similar task comes up, AI reuses existing tools instead of starting from scratch
-- **Dual AI Architecture**: Front-end AI has read-only access, back-end AI has full execution rights. Clear permission boundary
-- **Multi-language**: Supports English and Chinese interface
+**Core** — Executes commands, mechanically verifies results, persists state, manages lifecycle. All verification is code-based (zero AI tokens).
 
 ## Supported AI Providers
 
-| Provider | Model |
-|----------|-------|
-| OpenAI | GPT-4o |
-| Anthropic | Claude Sonnet |
-| Google | Gemini 2.0 Flash |
-| xAI | Grok 3 |
+| Provider | Model | Status |
+|----------|-------|--------|
+| OpenAI | GPT-4o | ✅ Tested |
+| Anthropic | Claude Sonnet | ✅ Supported |
+| Google | Gemini 2.0 Flash | ✅ Supported |
+| xAI | Grok 3 | ✅ Supported |
+
+Any OpenAI-compatible API endpoint works. Choose during setup.
 
 ## Quick Start
 
-### 1. Requirements
-- Python 3.10+
+### Requirements
+- Python 3.10+ (no pip install needed — zero dependencies)
 - A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
-- An API key from any supported AI provider
+- An API key from any supported provider
 
-### 2. Install & Setup
+### Install
 
 ```bash
-git clone https://github.com/yourusername/littleant.git
+git clone https://github.com/shellylittleant/littleant.git
 cd littleant
 python3 setup.py
 ```
 
-The setup wizard will ask you to:
-1. Choose language (English / 中文)
-2. Enter your Telegram Bot Token
-3. Select AI provider (OpenAI / Claude / Gemini / Grok)
-4. Enter your API key
+The setup wizard asks:
+1. 🌐 Language (English / 中文)
+2. 🤖 Telegram Bot Token
+3. 🧠 AI Provider (OpenAI / Claude / Gemini / Grok)
+4. 🔑 API Key
 
-### 3. Run
+### Run
 
 ```bash
 bash start.sh
 ```
 
-### 4. Run as a Service (recommended for production)
+### Run as a Service (recommended)
 
 ```bash
+# Edit WorkingDirectory in littleant.service to your install path
 cp littleant.service /etc/systemd/system/
-# Edit WorkingDirectory in the service file to match your install path
 systemctl daemon-reload
 systemctl enable littleant
 systemctl start littleant
@@ -71,60 +113,89 @@ systemctl start littleant
 
 ## Usage
 
-Open Telegram, find your bot, and start chatting:
+Open Telegram, find your bot, and chat:
 
 | What you say | What happens |
-|-------------|-------------|
+|---|---|
 | "How do I configure nginx?" | AI answers directly (chat mode) |
-| "Help me install LNMP" | AI confirms → plans → you approve → executes silently → reports results |
-| "What's in crontab?" | AI runs `crontab -l` directly (read-only) and tells you |
+| "Help me install LNMP" | Confirms → plans → you approve → executes → reports results |
+| "What's in crontab?" | Runs `crontab -l` directly (read-only) and tells you |
+| "What's my disk usage?" | Runs `df -h`, summarizes in plain language |
 | /status | Shows current task progress |
 | /cancel | Cancels current task |
+
+### How a Task Executes
+
+```
+1. You: "Help me install WordPress"
+2. Front-end AI: "Do you want me to execute this?" → You confirm
+3. Back-end AI generates execution plan → You review and approve
+4. Program executes each step silently, verifies each result mechanically
+5. If something fails → AI retries / modifies / skips autonomously
+6. When done → Front-end AI summarizes results in plain language
+```
+
+## Real-World Use Cases
+
+LittleAnt has been used on production servers for:
+
+- **LNMP Stack** — Nginx + MySQL + PHP installed, configured, and verified in one conversation
+- **Server Monitoring** — Custom monitoring plugin written and deployed
+- **Scheduled Tasks** — Cron jobs configured with Telegram notifications
+- **SSL & CDN** — Cloudflare integration plugin developed
+- **Web Crawlers** — Spider tools built and executed
+- **System Diagnostics** — Full server audit with plain-language report
 
 ## Project Structure
 
 ```
 littleant/
-├── setup.py                 Setup wizard (first-run config)
-├── run.py                   Main entry point
-├── start.sh                 One-command startup
+├── setup.py                 # Setup wizard
+├── run.py                   # Main entry point
+├── start.sh                 # One-command startup
+├── littleant.service         # systemd service file
+├── docs/
+│   └── WHITEPAPER.md        # Full technical whitepaper
 ├── littleant/
-│   ├── i18n/                Language files (en.json, zh.json)
-│   ├── ai/adapter.py        AI adapter (multi-provider, rate limiting)
+│   ├── i18n/                # Language files (en.json, zh.json)
+│   ├── ai/adapter.py        # Multi-provider AI adapter
 │   ├── core/
-│   │   ├── decomposer.py    Recursive decomposition engine
-│   │   ├── executor.py      Command executor
-│   │   ├── verifier.py      8 mechanical verifiers
-│   │   ├── recovery.py      Autonomous error recovery
-│   │   ├── orchestrator.py  Main orchestrator
-│   │   ├── protocol.py      Command protocol (keyboard & display)
-│   │   └── readonly_executor.py  Read-only executor for front-end AI
-│   ├── models/project.py    Data models & state machine
-│   └── storage/             JSON + SQLite persistence
-└── littleant.service        systemd service file
+│   │   ├── decomposer.py    # Recursive decomposition engine
+│   │   ├── executor.py      # Command executor
+│   │   ├── verifier.py      # 8 mechanical verifiers
+│   │   ├── recovery.py      # Autonomous error recovery
+│   │   ├── orchestrator.py  # Main orchestrator + tool library
+│   │   ├── protocol.py      # Command protocol (20 cmds + 7 feedbacks)
+│   │   └── readonly_executor.py  # Read-only executor with whitelist
+│   ├── models/project.py    # Data models & state machine
+│   └── storage/             # JSON + SQLite persistence
+└── README.md
 ```
 
-## How It Works
+## Design Principles
 
-1. **You say**: "Help me install WordPress"
-2. **Front-end AI** confirms: "Do you want me to execute this?"
-3. **You confirm**: "Yes"
-4. **Back-end AI** generates a project framework, then the program recursively asks the AI to break it down until every branch is a single executable command
-5. **You review** the execution plan and approve
-6. **Program executes** each command silently, mechanically verifies each result
-7. **If something fails**, back-end AI autonomously retries, modifies, or skips — only bothers you if safety limits are hit
-8. **When done**, front-end AI summarizes results in plain language
+> **"AI is the operator. Program is the computer."**
 
-## Design Philosophy
+- Command set is finite — AI chooses from predefined commands, can't invent new ones
+- All verification is mechanical — zero AI token consumption
+- Failed nodes are **deleted** from the chain, not marked — execution continues automatically
+- Successful projects auto-save to template library — AI reuses them next time
+- The operator can be swapped (GPT → Claude → Gemini) — the protocol stays the same
 
-> AI is the operator. Program is the computer.
+## Documentation
 
-The keyboard (command set) is finite — AI can only choose from predefined commands. The display (feedback) shows execution results. The operator can be swapped (GPT today, Claude tomorrow) — the keyboard stays the same.
-
-## License
-
-MIT
+- 📄 [Whitepaper (English)](docs/WHITEPAPER.md) — Full architecture, protocol, and design specification
 
 ## Contributing
 
-Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+[MIT](LICENSE)
+
+---
+
+<p align="center">
+  <sub>Built with recursive decomposition and mechanical verification.<br>Zero dependencies. Zero trust in AI output.</sub>
+</p>
