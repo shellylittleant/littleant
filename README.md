@@ -52,21 +52,21 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 ## Architecture
 
 ```
-┌─────────────┐     Natural Language     ┌──────────────────┐
-│    User      │◄──────────────────────►│  Front-end AI     │
-│  (Telegram)  │                         │  (Chat, ReadOnly) │
+┌─────────────┐     Natural Language    ┌──────────────────┐
+│    User     │ ◄──────────────────────►│  Front-end AI    │
+│  (Telegram) │                         │  (Chat, ReadOnly)│
 └─────────────┘                         └────────┬─────────┘
                                                  │ DB queries
                                                  │ Read-only commands
                                                  │ Initiate tasks
                                         ┌────────▼─────────┐
-                                        │   LittleAnt Core  │
-                                        │   (Orchestrator)  │
+                                        │   LittleAnt Core │
+                                        │   (Orchestrator) │
                                         └────────┬─────────┘
                                                  │ JSON Protocol
                                         ┌────────▼─────────┐
-                                        │  Back-end AI      │
-                                        │  (Execute, R/W)   │
+                                        │  Back-end AI     │
+                                        │  (Execute, R/W)  │
                                         └──────────────────┘
 ```
 
