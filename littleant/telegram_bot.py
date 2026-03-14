@@ -28,6 +28,11 @@ class TelegramBot:
         self.handlers: dict[str, Callable] = {}
         self.message_handler: Optional[Callable] = None
         self.callback_handler: Optional[Callable] = None
+        self._menu_commands: list[dict] = []
+
+    def set_menu_commands(self, commands: list[tuple[str, str]]):
+        """Set bot menu commands. Each item is (command, description)."""
+        self._menu_commands = [{"command": c, "description": d} for c, d in commands]
 
     # ============================================================
     # API calls
@@ -140,6 +145,10 @@ class TelegramBot:
         else:
             logger.error(f"Invalid bot token: {me}")
             return
+
+        # Set bot menu commands (clears any old ones)
+        if self._menu_commands:
+            self._call("setMyCommands", {"commands": self._menu_commands})
 
         while self.running:
             try:

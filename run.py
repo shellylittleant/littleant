@@ -165,6 +165,21 @@ def main():
     bot = TelegramBot(config["telegram_token"])
     orch = Orchestrator(ai=ai)
 
+    # Set bot menu (replaces any old V8 commands)
+    lang = config.get("language", "en")
+    if lang == "zh":
+        bot.set_menu_commands([
+            ("help", "查看帮助"),
+            ("status", "查看任务进度"),
+            ("cancel", "取消当前任务"),
+        ])
+    else:
+        bot.set_menu_commands([
+            ("help", "Show help"),
+            ("status", "Task progress"),
+            ("cancel", "Cancel current task"),
+        ])
+
     @bot.on_command("start")
     def cmd_start(msg):
         bot.send_message(msg["chat"]["id"], t("bot_welcome", name=msg["from"].get("first_name", "")))
