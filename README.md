@@ -16,12 +16,12 @@
 
 LittleAnt is an AI butler that lives on your server. You talk to it through Telegram, and it autonomously executes tasks — installing software, configuring services, writing scripts, monitoring systems, and more. Zero third-party Python dependencies.
 
-<!-- 
+
 TODO: Replace with your Telegram screenshot
 ![LittleAnt Demo1](docs/1.jpg)
 ![LittleAnt Demo2](docs/2.jpg)
 ![LittleAnt Demo3](docs/3.jpg)
--->
+
 
 ## Why LittleAnt?
 
