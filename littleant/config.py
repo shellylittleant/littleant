@@ -8,10 +8,12 @@ DB_PATH = os.path.join(DATA_DIR, "littleant.db")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 
 MAX_PATH_DEPTH = 5
-MAX_PROJECT_AI_CALLS = 100
+MAX_PROJECT_AI_CALLS = 1000
 MAX_NODE_RETRIES = 2
 MAX_NODE_MODIFICATIONS = 2
 MAX_CONSECUTIVE_FAILURES = 5
+MAX_LEAF_NODES = 50
+MAX_REPLAN_PER_PARENT = 3
 
 ALLOWED_EXECUTE_TYPES = ["run_shell", "write_file", "make_dir", "read_file", "http_request"]
 ALLOWED_VERIFY_TYPES = [

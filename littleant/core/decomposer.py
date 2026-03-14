@@ -7,7 +7,7 @@ import json, logging
 from littleant.models.project import Project, Node, NodeStatus, ExecuteSpec, VerifySpec
 from littleant.core.protocol import validate_ai_command, build_decompose, build_format_error
 from littleant.ai.adapter import AIAdapter
-from littleant.config import MAX_PATH_DEPTH, MAX_PROJECT_AI_CALLS
+from littleant.config import MAX_PATH_DEPTH, MAX_PROJECT_AI_CALLS, MAX_LEAF_NODES
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,9 @@ class Decomposer:
             raise DecompositionError(f"Node {node.id} depth exceeds {MAX_PATH_DEPTH}, pausing")
         if self.project.ai_call_count >= MAX_PROJECT_AI_CALLS:
             raise DecompositionError(f"Project AI call count exceeds {MAX_PROJECT_AI_CALLS}, pausing")
+        leaf_count = sum(1 for n in self.project.nodes.values() if n.is_leaf)
+        if leaf_count >= MAX_LEAF_NODES:
+            raise DecompositionError(f"Leaf node count exceeds {MAX_LEAF_NODES}, pausing")
         if node.is_leaf:
             node.status = NodeStatus.READY
             return
@@ -69,6 +72,7 @@ class Decomposer:
             children = response.get("children", [])
             for cd in children:
                 cn = Node(id=cd["id"], name=cd["name"], parent_id=node.id, depends_on=cd.get("depends_on", []))
+                cn.node_type = cd.get("type", getattr(node, "node_type", "modify"))
                 self.project.add_node(cn)
             for cd in children:
                 child = self.project.nodes[cd["id"]]

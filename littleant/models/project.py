@@ -101,6 +101,7 @@ class Node:
     execute: Optional[ExecuteSpec] = None
     verify: Optional[VerifySpec] = None
     on_fail: str = "report"
+    node_type: str = "modify"  # query / create / modify
 
     # Execution records
     execute_output: Optional[dict] = None
@@ -122,6 +123,7 @@ class Node:
             "depends_on": self.depends_on,
             "children": self.children,
             "on_fail": self.on_fail,
+            "node_type": self.node_type,
             "retry_count": self.retry_count,
             "modify_count": self.modify_count,
         }
@@ -145,6 +147,7 @@ class Node:
             status=NodeStatus(d.get("status", "pending")),
             children=d.get("children", []),
             on_fail=d.get("on_fail", "report"),
+            node_type=d.get("node_type", "modify"),
             retry_count=d.get("retry_count", 0),
             modify_count=d.get("modify_count", 0),
         )

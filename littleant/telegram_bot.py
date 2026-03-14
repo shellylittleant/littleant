@@ -107,6 +107,28 @@ class TelegramBot:
         """Send typing indicator"""
         self._call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
 
+    def download_file(self, file_id: str) -> str | None:
+        """Download a file from Telegram, return local path."""
+        try:
+            result = self._call("getFile", {"file_id": file_id})
+            if not result.get("ok"):
+                return None
+            file_path = result["result"]["file_path"]
+            url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
+
+            import urllib.request, os, tempfile
+            ext = os.path.splitext(file_path)[1] or ".bin"
+            local_dir = os.path.join(tempfile.gettempdir(), "littleant_files")
+            os.makedirs(local_dir, exist_ok=True)
+            local_path = os.path.join(local_dir, f"{file_id[:16]}{ext}")
+
+            urllib.request.urlretrieve(url, local_path)
+            logger.info(f"Downloaded file: {local_path}")
+            return local_path
+        except Exception as e:
+            logger.error(f"File download failed: {e}")
+            return None
+
     # ============================================================
     # Handler registration
     # ============================================================
@@ -185,15 +207,63 @@ class TelegramBot:
                 return
 
             msg = update.get("message")
-            if not msg or "text" not in msg:
+            if not msg:
+                return
+
+            chat_id = msg["chat"]["id"]
+
+            # Extract reply/quote context
+            reply_context = ""
+            if "reply_to_message" in msg:
+                replied = msg["reply_to_message"]
+                reply_text = replied.get("text", "")
+                if reply_text:
+                    reply_context = reply_text
+
+            # Handle photo messages
+            if "photo" in msg and not msg.get("text"):
+                caption = msg.get("caption", "")
+                # Get highest resolution photo
+                photo = msg["photo"][-1]
+                file_id = photo["file_id"]
+                file_path = self.download_file(file_id)
+                if self.message_handler:
+                    msg["_type"] = "photo"
+                    msg["_file_path"] = file_path
+                    msg["_caption"] = caption
+                    msg["_reply_context"] = reply_context
+                    msg["text"] = caption or "[photo]"
+                    self.message_handler(msg)
+                return
+
+            # Handle document/file messages
+            if "document" in msg and not msg.get("text"):
+                caption = msg.get("caption", "")
+                doc = msg["document"]
+                file_id = doc["file_id"]
+                file_name = doc.get("file_name", "unknown")
+                file_path = self.download_file(file_id)
+                if self.message_handler:
+                    msg["_type"] = "document"
+                    msg["_file_path"] = file_path
+                    msg["_file_name"] = file_name
+                    msg["_caption"] = caption
+                    msg["_reply_context"] = reply_context
+                    msg["text"] = caption or f"[file: {file_name}]"
+                    self.message_handler(msg)
+                return
+
+            # Text messages
+            if "text" not in msg:
                 return
 
             text = msg["text"]
-            chat_id = msg["chat"]["id"]
+            msg["_type"] = "text"
+            msg["_reply_context"] = reply_context
 
             # Command handling
             if text.startswith("/"):
-                cmd = text.split()[0].split("@")[0][1:]  # Strip leading slash and @botname
+                cmd = text.split()[0].split("@")[0][1:]
                 handler = self.handlers.get(cmd)
                 if handler:
                     handler(msg)
