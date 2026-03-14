@@ -1,0 +1,14 @@
+[Unit]
+Description=LittleAnt V12.1 - AI Intent Execution System
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/littleant
+ExecStart=/usr/bin/python3 /opt/littleant/run.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
