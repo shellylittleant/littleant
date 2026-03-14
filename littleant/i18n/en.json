@@ -35,5 +35,11 @@
   "no_projects": "No projects yet.",
   "unknown_msg": "I didn't understand. Could you rephrase?",
   "sorry_error": "Sorry, something went wrong.",
-  "task_running": "Task is running, please wait."
+  "task_running": "Task is running, please wait.",
+  "feedback_ask": "Did this task meet your requirements?",
+  "feedback_yes_btn": "✅ Yes, satisfied",
+  "feedback_no_btn": "❌ No, needs improvement",
+  "feedback_thanks": "Thanks for the feedback! 👍",
+  "feedback_ask_reason": "Thank you for your feedback. To help improve service quality, please describe what didn't meet your expectations.\n\nYour specific feedback will directly improve how similar tasks are handled in the future.",
+  "feedback_saved": "Feedback saved. We'll improve on this. Thank you! 🙏"
 }

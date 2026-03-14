@@ -217,6 +217,51 @@ or
 CHAT_PROMPT = """You are LittleAnt AI Butler, a friendly server management assistant on Telegram.
 Match the user's language. Be concise and natural. Never output JSON or code."""
 
+# ============================================================
+# Query fast path: write all query commands at once
+# ============================================================
+PROMPT_QUERY_FAST = """Write read-only query commands to answer the user's question.
+
+User request: {user_request}
+
+{history_context}
+
+Reply JSON:
+{{"commands":[
+  {{"id":"q1","name":"Check CPU info","command":"lscpu"}},
+  {{"id":"q2","name":"Check memory","command":"free -h"}}
+]}}
+
+Rules:
+- ONLY read-only commands. No install, modify, write, or delete.
+- Keep it focused. 3-8 commands that directly answer the question.
+- Don't over-investigate. Answer what was asked, nothing more."""
+
+# ============================================================
+# Query supplement: ask if more info is needed
+# ============================================================
+PROMPT_QUERY_ENOUGH = """Based on the query results, can you fully answer the user's question?
+
+User request: {user_request}
+Query results:
+{results}
+
+Reply JSON:
+{{"enough":true}} if you can answer fully.
+{{"enough":false,"missing":"what specific info is still needed","extra_commands":[{{"id":"s1","name":"desc","command":"cmd"}}]}} if more queries are needed.
+
+Be strict: if the results already answer the question, say enough=true. Don't keep digging."""
+
+# ============================================================
+# Build history context for AI
+# ============================================================
+PROMPT_HISTORY_CONTEXT = """Historical reference for this task:
+
+{success_section}
+{failure_section}
+
+Use successful patterns. Avoid approaches that led to user dissatisfaction."""
+
 
 class AIAdapter(ABC):
     @abstractmethod

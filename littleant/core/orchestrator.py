@@ -17,11 +17,15 @@ from littleant.models.project import (
 from littleant.core.executor import run_execute
 from littleant.core.verifier import run_verify
 from littleant.storage.json_store import save_project, load_project
-from littleant.storage.db_store import log_execution, save_template, save_tool
+from littleant.storage.db_store import (
+    log_execution, save_template, save_tool,
+    search_history_for_context, search_tools,
+)
 from littleant.ai.adapter import (
     AIAdapter, PROMPT_CLASSIFY, PROMPT_DESIGN, PROMPT_THINK,
     PROMPT_WRITE_QUERY, PROMPT_JUDGE, PROMPT_WRITE_ACTION, PROMPT_REVIEW,
     PROMPT_L1_RECOVERY, PROMPT_L2_DIAGNOSE, PROMPT_L2_FIX, PROMPT_L3_REDESIGN,
+    PROMPT_QUERY_FAST, PROMPT_QUERY_ENOUGH, PROMPT_HISTORY_CONTEXT,
 )
 from littleant.config import (
     MAX_NODE_RETRIES, MAX_NODE_MODIFICATIONS,
@@ -52,16 +56,20 @@ class Orchestrator:
     # Phase 2: Design steps → task_brief
     # ==========================================================
     def design_steps(self, user_request, command_types):
+        history_ctx = self.build_history_context(user_request)
         prompt = PROMPT_DESIGN.format(
             user_request=user_request,
             command_types=", ".join(command_types),
         )
+        if history_ctx:
+            prompt += f"\n\n{history_ctx}"
         r = self.ai.ask([{"role": "user", "content": prompt}])
         return {
             "user_request": user_request,
             "command_types": command_types,
             "ai_model": getattr(self.ai, "model", "unknown"),
             "planned_steps": r.get("steps", []),
+            "history_context": history_ctx,
         }
 
     # ==========================================================
@@ -95,6 +103,106 @@ class Orchestrator:
         save_project(p)
         logger.info(f"Project created: {p.id}")
         return p
+
+    # ==========================================================
+    # History context: search past tasks for AI reference
+    # ==========================================================
+    def build_history_context(self, user_request):
+        """Search history for similar tasks. Returns context string for AI."""
+        keywords = [k.strip() for k in user_request.split() if len(k.strip()) > 1][:5]
+        if not keywords:
+            return ""
+        success_cases, failure_cases = search_history_for_context(keywords)
+
+        if not success_cases and not failure_cases:
+            return ""
+
+        success_section = ""
+        if success_cases:
+            lines = []
+            for c in success_cases[:3]:
+                lines.append(f"- \"{c['name']}\" (rated {c['rating']}/5, {c['nodes']} commands)")
+            success_section = "Successful similar tasks:\n" + "\n".join(lines)
+
+        failure_section = ""
+        if failure_cases:
+            lines = []
+            for c in failure_cases[:3]:
+                lines.append(f"- \"{c['name']}\" — user feedback: \"{c['feedback']}\"")
+            failure_section = "Failed similar tasks (AVOID these patterns):\n" + "\n".join(lines)
+
+        return PROMPT_HISTORY_CONTEXT.format(
+            success_section=success_section or "No successful cases found.",
+            failure_section=failure_section or "No failure cases found.",
+        )
+
+    # ==========================================================
+    # QUERY FAST PATH: for pure query tasks (no cycle needed)
+    # ==========================================================
+    def run_query_fast(self, project, on_status=None):
+        """
+        Fast path for pure query tasks.
+        Write queries → execute → check if enough → supplement if needed → done.
+        Max 2 rounds. No judge/action cycle.
+        Returns: "completed" / "failed"
+        """
+        brief = project.task_brief
+        history_ctx = self.build_history_context(brief["user_request"])
+
+        if on_status:
+            on_status("Querying system...")
+
+        # Round 1: write and execute queries
+        prompt = PROMPT_QUERY_FAST.format(
+            user_request=brief["user_request"],
+            history_context=history_ctx or "No historical reference.",
+        )
+        try:
+            r = self.ai.ask([{"role": "user", "content": prompt}])
+            queries = r.get("commands", [])
+        except Exception as e:
+            logger.error(f"Query fast write failed: {e}")
+            project.status = ProjectStatus.FAILED; save_project(project)
+            return "failed"
+
+        if not queries:
+            project.status = ProjectStatus.FAILED; save_project(project)
+            return "failed"
+
+        results = self._run_queries(project, queries)
+        results_text = self._format_results(results)
+        save_project(project)
+
+        # Check if results are enough
+        prompt2 = PROMPT_QUERY_ENOUGH.format(
+            user_request=brief["user_request"],
+            results=results_text,
+        )
+        try:
+            r2 = self.ai.ask([{"role": "user", "content": prompt2}])
+        except:
+            # Can't check, assume enough
+            project.status = ProjectStatus.COMPLETED; save_project(project)
+            self._save_to_library(project)
+            return "completed"
+
+        if r2.get("enough", True):
+            project.status = ProjectStatus.COMPLETED; save_project(project)
+            self._save_to_library(project)
+            return "completed"
+
+        # Round 2: supplement queries
+        extra_cmds = r2.get("extra_commands", [])
+        if extra_cmds:
+            if on_status:
+                on_status("Running additional checks...")
+            extra_results = self._run_queries(project, extra_cmds)
+            results.update(extra_results)
+            save_project(project)
+
+        project.status = ProjectStatus.COMPLETED; save_project(project)
+        self._save_to_library(project)
+        return "completed"
 
     # ==========================================================
     # MAIN CYCLE: query → judge → act → query → ... → goal met

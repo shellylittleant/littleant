@@ -35,5 +35,11 @@
   "no_projects": "还没有执行过任何项目。",
   "unknown_msg": "我不太理解，能换个说法吗？",
   "sorry_error": "抱歉，出了点问题。",
-  "task_running": "任务正在执行中，请稍候。"
+  "task_running": "任务正在执行中，请稍候。",
+  "feedback_ask": "该任务是否达到您的要求？",
+  "feedback_yes_btn": "✅ 达到要求",
+  "feedback_no_btn": "❌ 未达到",
+  "feedback_thanks": "感谢反馈！👍",
+  "feedback_ask_reason": "感谢您的反馈。为了帮助系统改进，请具体描述哪些方面没有达到您的要求。\n\n您的认真填写将直接提升后续类似任务的执行质量。",
+  "feedback_saved": "反馈已记录，我们会持续改进。谢谢！🙏"
 }

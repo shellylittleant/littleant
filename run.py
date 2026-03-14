@@ -16,7 +16,7 @@ from littleant.core.orchestrator import Orchestrator
 from littleant.core.readonly_executor import run_readonly, is_safe_readonly
 from littleant.models.project import Project, ProjectStatus, NodeStatus
 from littleant.storage.json_store import save_project, load_project, list_projects
-from littleant.storage.db_store import init_db, search_tools, search_templates
+from littleant.storage.db_store import init_db, search_tools, search_templates, update_template_feedback
 from setup import PROVIDERS_BY_ID, test_api_key, save_config as save_setup_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
@@ -39,6 +39,7 @@ class UserSession:
         self.state = "idle"
         self.pending_task = None
         self.pending_provider = None
+        self.pending_template_id = None  # for feedback
         self.confirm_event = threading.Event()
         self.confirm_result = None
         self.confirm_commands = None
@@ -97,7 +98,8 @@ Rules: when unsure choose chat. "skip"/"forget it" → skip_node."""
 def classify(ai, s, text):
     sd = {"idle":"idle","confirming_task":f"confirming task: {s.pending_task}",
           "confirming_plan":"confirming execution plan","executing":"task running",
-          "waiting_user":"step failed, waiting","waiting_api_key":"waiting for API key input"
+          "waiting_user":"step failed, waiting","waiting_api_key":"waiting for API key input",
+          "waiting_feedback":"waiting for task feedback"
           }.get(s.state, "idle")
     if s.current_project_id:
         st = s.status_text()
@@ -216,6 +218,12 @@ def main():
                 bot.send_message(cid, f"❌ API key invalid: {err}\nTry again or /cancel.")
                 return
             s.state="idle"; s.pending_provider=None; return
+
+        # Handle user feedback text (unsatisfied reason)
+        if s.state == "waiting_feedback" and s.pending_template_id and text:
+            update_template_feedback(s.pending_template_id, 1, text)
+            bot.send_message(cid, t("feedback_saved"))
+            s.state = "idle"; s.pending_template_id = None; return
 
         # Reply/quote context
         reply_ctx = msg.get("_reply_context","")
@@ -402,21 +410,53 @@ def main():
             else:
                 s.state="waiting_api_key"; s.pending_provider=pid
                 bot.send_message(cid, f"Please send me your {info['name']} API key:")
+        elif data == "feedback_yes":
+            if s.pending_template_id:
+                update_template_feedback(s.pending_template_id, 5, "")
+                bot.send_message(cid, t("feedback_thanks"))
+                s.pending_template_id = None; s.state = "idle"
+        elif data == "feedback_no":
+            if s.pending_template_id:
+                bot.send_message(cid, t("feedback_ask_reason"))
+                s.state = "waiting_feedback"
 
     # ======== Background task runner ========
 
     def _run_task(bot, ai, orch, s, task_desc, types, needs_confirm):
-        """Cycle execution: classify → design → [query → judge → act] cycles."""
+        """Route: pure query → fast path, mixed → cycle model."""
         cid = s.chat_id
         s.busy = True; s.state = "executing"
         try:
-            # Phase 2: Design steps
-            task_brief = orch.design_steps(task_desc, types)
+            # Pure query: fast path (no cycle, no confirmation)
+            if types == ["query"]:
+                task_brief = {
+                    "user_request": task_desc,
+                    "command_types": types,
+                    "ai_model": getattr(ai, "model", "unknown"),
+                    "planned_steps": [],
+                }
+                project = orch.create_project(task_brief)
+                s.current_project_id = project.id
 
-            # Phase 2b: Think steps (AI reasoning, no commands)
+                def on_status(msg):
+                    bot.send_message(cid, f"⏳ {msg}")
+
+                result = orch.run_query_fast(project, on_status=on_status)
+
+                if result == "completed":
+                    summary = summarize_results(ai, project)
+                    bot.send_message(cid, t("exec_done", summary=summary))
+                    s.add_ai(summary)
+                    _send_feedback_buttons(bot, cid, s, project)
+                else:
+                    bot.send_message(cid, t("exec_failed"))
+                return
+
+            # Mixed tasks: design steps → cycle model
+            task_brief = orch.design_steps(task_desc, types)
             task_brief = orch.do_think_steps(task_brief)
 
-            # Show plan to user
+            # Show plan
             steps = task_brief.get("planned_steps", [])
             step_lines = []
             for step in steps:
@@ -425,15 +465,12 @@ def main():
                 step_lines.append(f"  {step['step']}. [{step['type']}] {step['name']}{dep}{done}")
             bot.send_message(cid, f"📋 Plan ({len(steps)} steps):\n" + "\n".join(step_lines))
 
-            # Create project
             project = orch.create_project(task_brief)
             s.current_project_id = project.id
 
-            # Confirm callback for create/modify actions
             def on_confirm(plan_text):
                 s.state = "confirming_plan"
-                s.confirm_event.clear()
-                s.confirm_result = None
+                s.confirm_event.clear(); s.confirm_result = None
                 bot.send_message(cid, f"📋 Ready to execute:\n\n{plan_text}\n\n{t('plan_confirm')}",
                     reply_markup={"inline_keyboard":[[
                         {"text":t("plan_approve_btn"),"callback_data":"approve_plan"},
@@ -442,10 +479,9 @@ def main():
                 s.state = "executing"
                 return s.confirm_result == True
 
-            def on_status(message):
-                bot.send_message(cid, f"⏳ {message}")
+            def on_status(msg):
+                bot.send_message(cid, f"⏳ {msg}")
 
-            # Main cycle: query → judge → act → query → ... → goal met
             result = orch.run_cycle(
                 project,
                 on_confirm=on_confirm if needs_confirm else None,
@@ -456,6 +492,7 @@ def main():
                 summary = summarize_results(ai, project)
                 bot.send_message(cid, t("exec_done", summary=summary))
                 s.add_ai(summary)
+                _send_feedback_buttons(bot, cid, s, project)
             elif result == "aborted":
                 bot.send_message(cid, t("plan_rejected"))
             elif result == "waiting_user":
@@ -472,20 +509,28 @@ def main():
             logger.error(traceback.format_exc())
             bot.send_message(cid, t("planning_error", error=str(e)[:200]))
         finally:
-            if s.state != "waiting_user":
+            if s.state not in ("waiting_user", "waiting_feedback"):
                 s.busy = False; s.state = "idle"
             else:
                 s.busy = False
 
+    def _send_feedback_buttons(bot, cid, s, project):
+        """Send feedback buttons after task completion."""
+        tpl_id = f"tpl_{project.id}"
+        s.pending_template_id = tpl_id
+        bot.send_message(cid, t("feedback_ask"), reply_markup={"inline_keyboard":[[
+            {"text": t("feedback_yes_btn"), "callback_data": "feedback_yes"},
+            {"text": t("feedback_no_btn"), "callback_data": "feedback_no"}]]})
+
     def _resume_task(bot, ai, orch, s, project):
-        """Resume: re-enter the cycle from where we left off."""
+        """Resume: re-enter the cycle."""
         cid = s.chat_id
         s.busy = True; s.state = "executing"
         try:
             def on_confirm(plan_text):
                 s.state = "confirming_plan"
                 s.confirm_event.clear(); s.confirm_result = None
-                bot.send_message(cid, f"📋 Resume execution:\n\n{plan_text}\n\n{t('plan_confirm')}",
+                bot.send_message(cid, f"📋 Resume:\n\n{plan_text}\n\n{t('plan_confirm')}",
                     reply_markup={"inline_keyboard":[[
                         {"text":t("plan_approve_btn"),"callback_data":"approve_plan"},
                         {"text":t("plan_reject_btn"),"callback_data":"reject_plan"}]]})
@@ -501,6 +546,7 @@ def main():
             if result == "completed":
                 summary = summarize_results(ai, project)
                 bot.send_message(cid, t("exec_done", summary=summary)); s.add_ai(summary)
+                _send_feedback_buttons(bot, cid, s, project)
             elif result == "waiting_user":
                 for n in project.nodes.values():
                     if n.status == NodeStatus.FAILED:
@@ -513,7 +559,7 @@ def main():
             logger.error(traceback.format_exc())
             bot.send_message(cid, t("exec_error", error=str(e)[:200]))
         finally:
-            if s.state != "waiting_user": s.busy=False; s.state="idle"
+            if s.state not in ("waiting_user", "waiting_feedback"): s.busy=False; s.state="idle"
             else: s.busy=False
 
     # ======== Start ========
