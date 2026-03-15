@@ -60,6 +60,41 @@ def init_db():
         );
 
         CREATE INDEX IF NOT EXISTS idx_tools_keywords ON tools(keywords);
+
+        CREATE TABLE IF NOT EXISTS experiment_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT,
+            task_name TEXT,
+            task_types TEXT,
+            event_type TEXT NOT NULL,
+            direction TEXT,
+            actor TEXT,
+            input_text TEXT,
+            output_text TEXT,
+            command TEXT,
+            stdout TEXT,
+            stderr TEXT,
+            return_code INTEGER,
+            ai_prompt TEXT,
+            ai_response TEXT,
+            ai_model TEXT,
+            api_tokens_in INTEGER DEFAULT 0,
+            api_tokens_out INTEGER DEFAULT 0,
+            cycle_number INTEGER DEFAULT 0,
+            recovery_level TEXT DEFAULT 'none',
+            node_id TEXT,
+            verify_type TEXT,
+            verify_passed INTEGER,
+            verify_detail TEXT,
+            duration_ms INTEGER DEFAULT 0,
+            api_calls_total INTEGER DEFAULT 0,
+            error_message TEXT,
+            timestamp REAL DEFAULT (strftime('%s','now') || substr(strftime('%f','now'),4))
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_exp_project ON experiment_log(project_id);
+        CREATE INDEX IF NOT EXISTS idx_exp_event ON experiment_log(event_type);
+        CREATE INDEX IF NOT EXISTS idx_exp_time ON experiment_log(timestamp);
     """)
     # Migration: add columns if missing (for existing DBs)
     try: conn.execute("ALTER TABLE templates ADD COLUMN user_rating INTEGER DEFAULT 0")
@@ -70,6 +105,50 @@ def init_db():
     except: pass
     conn.commit()
     conn.close()
+
+
+# ============================================================
+# Experiment Log (Black Box Recorder)
+# ============================================================
+
+def log_event(project_id=None, task_name=None, task_types=None,
+              event_type="unknown", direction=None, actor=None,
+              input_text=None, output_text=None,
+              command=None, stdout=None, stderr=None, return_code=None,
+              ai_prompt=None, ai_response=None, ai_model=None,
+              api_tokens_in=0, api_tokens_out=0,
+              cycle_number=0, recovery_level="none", node_id=None,
+              verify_type=None, verify_passed=None, verify_detail=None,
+              duration_ms=0, api_calls_total=0, error_message=None):
+    """Record one event to the black box. Every interaction = one row."""
+    try:
+        conn = _get_conn()
+        conn.execute("""
+            INSERT INTO experiment_log (
+                project_id, task_name, task_types, event_type, direction, actor,
+                input_text, output_text, command, stdout, stderr, return_code,
+                ai_prompt, ai_response, ai_model, api_tokens_in, api_tokens_out,
+                cycle_number, recovery_level, node_id,
+                verify_type, verify_passed, verify_detail,
+                duration_ms, api_calls_total, error_message
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (project_id, task_name, task_types, event_type, direction, actor,
+              _trunc(input_text), _trunc(output_text),
+              command, _trunc(stdout), _trunc(stderr, 5000), return_code,
+              _trunc(ai_prompt, 20000), _trunc(ai_response, 20000), ai_model,
+              api_tokens_in, api_tokens_out,
+              cycle_number, recovery_level, node_id,
+              verify_type, verify_passed, verify_detail,
+              duration_ms, api_calls_total, error_message))
+        conn.commit(); conn.close()
+    except Exception as e:
+        logger.warning(f"log_event failed: {e}")
+
+def _trunc(text, max_len=10000):
+    """Truncate text to avoid DB bloat."""
+    if text is None: return None
+    text = str(text)
+    return text[:max_len] if len(text) > max_len else text
 
 
 # ============================================================

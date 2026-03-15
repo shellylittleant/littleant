@@ -16,7 +16,7 @@ from littleant.core.orchestrator import Orchestrator
 from littleant.core.readonly_executor import run_readonly, is_safe_readonly
 from littleant.models.project import Project, ProjectStatus, NodeStatus
 from littleant.storage.json_store import save_project, load_project, list_projects
-from littleant.storage.db_store import init_db, search_tools, search_templates, update_template_feedback
+from littleant.storage.db_store import init_db, search_tools, search_templates, update_template_feedback, log_event
 from setup import PROVIDERS_BY_ID, test_api_key, save_config as save_setup_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s", datefmt="%H:%M:%S")
@@ -39,7 +39,9 @@ class UserSession:
         self.state = "idle"
         self.pending_task = None
         self.pending_provider = None
-        self.pending_template_id = None  # for feedback
+        self.pending_template_id = None
+        self.auto_mode = False      # Full auto, no confirm during execution
+        self.authorized = False     # One-time authorization for the current task
         self.confirm_event = threading.Event()
         self.confirm_result = None
         self.confirm_commands = None
@@ -99,7 +101,8 @@ def classify(ai, s, text):
     sd = {"idle":"idle","confirming_task":f"confirming task: {s.pending_task}",
           "confirming_plan":"confirming execution plan","executing":"task running",
           "waiting_user":"step failed, waiting","waiting_api_key":"waiting for API key input",
-          "waiting_feedback":"waiting for task feedback"
+          "waiting_feedback":"waiting for task feedback",
+          "modifying_task":"user is modifying the task description"
           }.get(s.state, "idle")
     if s.current_project_id:
         st = s.status_text()
@@ -222,8 +225,30 @@ def main():
         # Handle user feedback text (unsatisfied reason)
         if s.state == "waiting_feedback" and s.pending_template_id and text:
             update_template_feedback(s.pending_template_id, 1, text)
+            log_event(project_id=s.current_project_id, event_type="user_feedback",
+                      direction="user→program", actor="user",
+                      input_text=text, output_text="rating=1")
             bot.send_message(cid, t("feedback_saved"))
             s.state = "idle"; s.pending_template_id = None; return
+
+        # Handle task modification text
+        if s.state == "modifying_task" and s.pending_task and text:
+            original = s.pending_task
+            modified = f"{original}\n\nUser modification: {text}"
+            s.pending_task = modified
+            s.state = "idle"
+            # Re-classify and re-confirm
+            types, summary = orch.classify_task(modified)
+            has_delete = any(kw in modified.lower() for kw in ["delete","remove","drop","rm ","purge","uninstall"])
+            risk_msg = t("risk_warning_high") if has_delete else t("risk_warning_medium")
+            s.state = "confirming_task"
+            msg = f"{t('confirm_task', task=modified[:200])}\n\n{risk_msg}"
+            bot.send_message(cid, msg, reply_markup={"inline_keyboard":[
+                [{"text":t("confirm_task_yes_btn"),"callback_data":"confirm_task_yes"},
+                 {"text":t("confirm_task_auto_btn"),"callback_data":"confirm_task_auto"}],
+                [{"text":t("confirm_task_edit_btn"),"callback_data":"confirm_task_edit"},
+                 {"text":t("confirm_task_no_btn"),"callback_data":"confirm_task_no"}]]})
+            return
 
         # Reply/quote context
         reply_ctx = msg.get("_reply_context","")
@@ -264,9 +289,15 @@ def main():
         full_text = f"[Quoted: {reply_ctx[:300]}]\n{text}" if reply_ctx else text
         s.add_user(full_text)
 
+        pid = s.current_project_id
+        log_event(project_id=pid, event_type="user_message", direction="user→ai",
+                  actor="user", input_text=full_text)
+
         result = classify(ai, s, full_text)
         intent = result.get("intent","chat")
         logger.info(f"[{cid}] intent={intent} state={s.state}")
+        log_event(project_id=pid, event_type="intent_classify", actor="frontend_ai",
+                  output_text=json.dumps(result, ensure_ascii=False)[:2000])
 
         # Chat
         if intent == "chat":
@@ -310,40 +341,47 @@ def main():
         elif intent == "task":
             if s.busy: bot.send_message(cid, t("busy")); return
             td = result.get("task_description", text)
-
-            # Phase 1: classify
             types, summary = orch.classify_task(td)
             s.pending_task = td
+            s.auto_mode = False; s.authorized = False
+
+            log_event(event_type="task_classify", actor="backend_ai",
+                      task_name=td, task_types=",".join(types),
+                      output_text=f"types={types}, summary={summary}")
 
             if types == ["query"]:
-                # Pure query → no confirmation needed
+                s.authorized = True
                 r = t("planning", task=td)
                 bot.send_message(cid, r); s.add_ai(r)
-                threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types,False), daemon=True).start()
+                threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types), daemon=True).start()
             else:
-                # Has create/modify → confirm first
+                has_delete = any(kw in td.lower() for kw in ["delete","remove","drop","rm ","purge","uninstall"])
+                risk_msg = t("risk_warning_high") if has_delete else t("risk_warning_medium")
                 s.state = "confirming_task"
-                r = t("confirm_task", task=td)
-                bot.send_message(cid, r, reply_markup={"inline_keyboard":[[
-                    {"text":t("confirm_task_yes_btn"),"callback_data":"confirm_task_yes"},
-                    {"text":t("confirm_task_no_btn"),"callback_data":"confirm_task_no"}]]})
-                s.add_ai(r)
+                msg = f"{t('confirm_task', task=td)}\n\n{risk_msg}"
+                bot.send_message(cid, msg, reply_markup={"inline_keyboard":[
+                    [{"text":t("confirm_task_yes_btn"),"callback_data":"confirm_task_yes"},
+                     {"text":t("confirm_task_auto_btn"),"callback_data":"confirm_task_auto"}],
+                    [{"text":t("confirm_task_edit_btn"),"callback_data":"confirm_task_edit"},
+                     {"text":t("confirm_task_no_btn"),"callback_data":"confirm_task_no"}]]})
+                s.add_ai(msg)
 
         # Confirm yes
         elif intent == "confirm_yes":
             if s.state == "confirming_task" and s.pending_task:
                 s.state = "idle"; td = s.pending_task; s.pending_task = None
+                s.authorized = True
                 types, _ = orch.classify_task(td)
                 r = t("planning", task=td)
                 bot.send_message(cid, r); s.add_ai(r)
-                threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types,True), daemon=True).start()
+                threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types), daemon=True).start()
             elif s.state == "confirming_plan":
                 s.confirm_result = True; s.confirm_event.set()
             else: bot.send_message(cid, t("no_confirm_pending"))
 
         # Confirm no
         elif intent == "confirm_no":
-            if s.state == "confirming_task":
+            if s.state in ("confirming_task", "modifying_task"):
                 s.state="idle"; s.pending_task=None
             elif s.state == "confirming_plan":
                 s.confirm_result = False; s.confirm_event.set()
@@ -385,17 +423,48 @@ def main():
     def handle_cb(cb):
         cid = cb["message"]["chat"]["id"]; data = cb.get("data",""); bot.answer_callback(cb["id"])
         s = get_session(cid)
+
+        # === Task creation buttons ===
         if data == "confirm_task_yes" and s.state == "confirming_task" and s.pending_task:
             s.state="idle"; td=s.pending_task; s.pending_task=None
+            s.authorized=True; s.auto_mode=False
             types, _ = orch.classify_task(td)
             bot.send_message(cid, t("planning", task=td))
-            threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types,True), daemon=True).start()
+            threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types), daemon=True).start()
+
+        elif data == "confirm_task_auto" and s.state == "confirming_task" and s.pending_task:
+            s.state="idle"; td=s.pending_task; s.pending_task=None
+            s.authorized=True; s.auto_mode=True
+            types, _ = orch.classify_task(td)
+            bot.send_message(cid, t("auto_mode_start"))
+            threading.Thread(target=_run_task, args=(bot,ai,orch,s,td,types), daemon=True).start()
+
+        elif data == "confirm_task_edit" and s.state == "confirming_task" and s.pending_task:
+            s.state = "modifying_task"
+            bot.send_message(cid, t("edit_task_prompt"))
+
         elif data == "confirm_task_no":
-            s.state="idle"; s.pending_task=None; bot.send_message(cid, t("confirm_no_reply"))
+            s.state="idle"; s.pending_task=None
+            bot.send_message(cid, t("confirm_no_reply"))
+
+        # === Plan confirmation buttons ===
         elif data == "approve_plan":
             s.confirm_result = True; s.confirm_event.set()
+
+        elif data == "plan_auto":
+            s.auto_mode = True
+            s.confirm_result = True; s.confirm_event.set()
+            bot.send_message(cid, t("auto_mode_start"))
+
+        elif data == "plan_edit":
+            # Reject current plan, AI will replan
+            s.confirm_result = False; s.confirm_event.set()
+            bot.send_message(cid, "Adjusting plan...")
+
         elif data == "reject_plan":
             s.confirm_result = False; s.confirm_event.set()
+
+        # === Model switching ===
         elif data.startswith("switch_"):
             pid = data.replace("switch_","")
             info = PROVIDERS_BY_ID.get(pid)
@@ -413,6 +482,9 @@ def main():
         elif data == "feedback_yes":
             if s.pending_template_id:
                 update_template_feedback(s.pending_template_id, 5, "")
+                log_event(project_id=s.current_project_id, event_type="user_feedback",
+                          direction="user→program", actor="user",
+                          input_text="satisfied", output_text="rating=5")
                 bot.send_message(cid, t("feedback_thanks"))
                 s.pending_template_id = None; s.state = "idle"
         elif data == "feedback_no":
@@ -422,27 +494,27 @@ def main():
 
     # ======== Background task runner ========
 
-    def _run_task(bot, ai, orch, s, task_desc, types, needs_confirm):
-        """Route: pure query → fast path, mixed → cycle model."""
+    def _run_task(bot, ai, orch, s, task_desc, types):
+        """Route: pure query → fast path, mixed → cycle model. Respects auto_mode/authorized."""
         cid = s.chat_id
         s.busy = True; s.state = "executing"
         try:
-            # Pure query: fast path (no cycle, no confirmation)
+            # Pure query: fast path
             if types == ["query"]:
                 task_brief = {
-                    "user_request": task_desc,
-                    "command_types": types,
-                    "ai_model": getattr(ai, "model", "unknown"),
-                    "planned_steps": [],
+                    "user_request": task_desc, "command_types": types,
+                    "ai_model": getattr(ai, "model", "unknown"), "planned_steps": [],
                 }
                 project = orch.create_project(task_brief)
                 s.current_project_id = project.id
 
                 def on_status(msg):
-                    bot.send_message(cid, f"⏳ {msg}")
+                    if s.auto_mode:
+                        bot.send_message(cid, t("auto_mode_progress", message=msg))
+                    else:
+                        bot.send_message(cid, f"⏳ {msg}")
 
                 result = orch.run_query_fast(project, on_status=on_status)
-
                 if result == "completed":
                     summary = summarize_results(ai, project)
                     bot.send_message(cid, t("exec_done", summary=summary))
@@ -469,24 +541,24 @@ def main():
             s.current_project_id = project.id
 
             def on_confirm(plan_text):
-                s.state = "confirming_plan"
-                s.confirm_event.clear(); s.confirm_result = None
-                bot.send_message(cid, f"📋 Ready to execute:\n\n{plan_text}\n\n{t('plan_confirm')}",
-                    reply_markup={"inline_keyboard":[[
-                        {"text":t("plan_approve_btn"),"callback_data":"approve_plan"},
-                        {"text":t("plan_reject_btn"),"callback_data":"reject_plan"}]]})
-                s.confirm_event.wait(timeout=300)
-                s.state = "executing"
-                return s.confirm_result == True
+                # Already authorized (user clicked confirm/auto at task creation)
+                if s.authorized:
+                    if s.auto_mode:
+                        bot.send_message(cid, t("auto_mode_progress", message="executing..."))
+                    else:
+                        bot.send_message(cid, f"⏳ Executing:\n{plan_text[:300]}")
+                    return True
+                # Should not reach here, but handle gracefully
+                return True
 
             def on_status(msg):
-                bot.send_message(cid, f"⏳ {msg}")
+                if s.auto_mode:
+                    pass  # Silent in auto mode, report at end
+                else:
+                    bot.send_message(cid, f"⏳ {msg}")
 
             result = orch.run_cycle(
-                project,
-                on_confirm=on_confirm if needs_confirm else None,
-                on_status=on_status,
-            )
+                project, on_confirm=on_confirm, on_status=on_status)
 
             if result == "completed":
                 summary = summarize_results(ai, project)
@@ -511,11 +583,11 @@ def main():
         finally:
             if s.state not in ("waiting_user", "waiting_feedback"):
                 s.busy = False; s.state = "idle"
+                s.auto_mode = False; s.authorized = False
             else:
                 s.busy = False
 
     def _send_feedback_buttons(bot, cid, s, project):
-        """Send feedback buttons after task completion."""
         tpl_id = f"tpl_{project.id}"
         s.pending_template_id = tpl_id
         bot.send_message(cid, t("feedback_ask"), reply_markup={"inline_keyboard":[[
@@ -523,26 +595,20 @@ def main():
             {"text": t("feedback_no_btn"), "callback_data": "feedback_no"}]]})
 
     def _resume_task(bot, ai, orch, s, project):
-        """Resume: re-enter the cycle."""
         cid = s.chat_id
-        s.busy = True; s.state = "executing"
+        s.busy = True; s.state = "executing"; s.authorized = True
         try:
             def on_confirm(plan_text):
-                s.state = "confirming_plan"
-                s.confirm_event.clear(); s.confirm_result = None
-                bot.send_message(cid, f"📋 Resume:\n\n{plan_text}\n\n{t('plan_confirm')}",
-                    reply_markup={"inline_keyboard":[[
-                        {"text":t("plan_approve_btn"),"callback_data":"approve_plan"},
-                        {"text":t("plan_reject_btn"),"callback_data":"reject_plan"}]]})
-                s.confirm_event.wait(timeout=300)
-                s.state = "executing"
-                return s.confirm_result == True
+                if s.auto_mode:
+                    return True
+                bot.send_message(cid, f"⏳ Executing:\n{plan_text[:300]}")
+                return True
 
             def on_status(msg):
-                bot.send_message(cid, f"⏳ {msg}")
+                if not s.auto_mode:
+                    bot.send_message(cid, f"⏳ {msg}")
 
             result = orch.run_cycle(project, on_confirm=on_confirm, on_status=on_status)
-
             if result == "completed":
                 summary = summarize_results(ai, project)
                 bot.send_message(cid, t("exec_done", summary=summary)); s.add_ai(summary)
@@ -559,7 +625,8 @@ def main():
             logger.error(traceback.format_exc())
             bot.send_message(cid, t("exec_error", error=str(e)[:200]))
         finally:
-            if s.state not in ("waiting_user", "waiting_feedback"): s.busy=False; s.state="idle"
+            if s.state not in ("waiting_user", "waiting_feedback"):
+                s.busy=False; s.state="idle"; s.auto_mode=False; s.authorized=False
             else: s.busy=False
 
     # ======== Start ========
