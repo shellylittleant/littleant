@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Recovery Utilities
+LittleAnt V14 - Recovery Utilities
 Node removal and crash recovery helpers.
 L1/L2/L3 recovery logic lives in orchestrator.py.
 """

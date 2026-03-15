@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Project & Node Models
+LittleAnt V14 - Project & Node Models
 Project tree and node state machine.
 """
 from __future__ import annotations
@@ -38,13 +38,14 @@ class ExecuteSpec:
     command: Optional[str] = None
     path: Optional[str] = None
     content: Optional[str] = None
+    description: Optional[str] = None  # For write_file: what to generate
     url: Optional[str] = None
     method: Optional[str] = None
     body: Optional[dict] = None
 
     def to_dict(self) -> dict:
         d = {"type": self.type}
-        for k in ("command", "path", "content", "url", "method", "body"):
+        for k in ("command", "path", "content", "description", "url", "method", "body"):
             v = getattr(self, k)
             if v is not None:
                 d[k] = v
@@ -52,7 +53,7 @@ class ExecuteSpec:
 
     @classmethod
     def from_dict(cls, d: dict) -> ExecuteSpec:
-        return cls(**{k: d.get(k) for k in ("type", "command", "path", "content", "url", "method", "body")})
+        return cls(**{k: d.get(k) for k in ("type", "command", "path", "content", "description", "url", "method", "body")})
 
 
 @dataclass

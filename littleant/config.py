@@ -1,4 +1,4 @@
-"""LittleAnt V13 - System Configuration"""
+"""LittleAnt V14 - System Configuration"""
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

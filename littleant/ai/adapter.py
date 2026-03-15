@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - AI Adapter
+LittleAnt V14 - AI Adapter
 Cycle execution model: query → judge → act → query → ... → goal met
 Three-level recovery: L1 command-level → L2 query+diagnose → L3 redesign
 """
@@ -80,7 +80,7 @@ Rules:
 # ============================================================
 # Phase 4: Judge - compare snapshot with goal
 # ============================================================
-PROMPT_JUDGE = """Compare the current system state with the user's goal.
+PROMPT_JUDGE = """Compare the current system state with the user's ORIGINAL goal.
 
 === TASK ===
 {task_brief}
@@ -97,7 +97,12 @@ or
 {{"goal_met":true,"summary":"everything is done, here's what was achieved"}}
 
 action_type: "create" or "modify"
-Be specific about what exactly needs to be done."""
+
+CRITICAL RULES:
+- ONLY judge against what the user explicitly asked for. Do NOT add requirements the user didn't mention.
+- If user said "install nginx and create a website", do NOT add SSL/HTTPS/certbot/DNS verification/firewall/security hardening on your own.
+- If the core deliverables are done (service running, files created, config applied), say goal_met=true.
+- Perfection is the enemy of done. Ship it."""
 
 # ============================================================
 # Phase 5: Write action commands
@@ -115,13 +120,107 @@ PROMPT_WRITE_ACTION = """Write executable commands for this action.
 
 Reply JSON:
 {{"commands":[
-  {{"id":"a1","name":"description","execute":{{"type":"run_shell","command":"actual cmd"}},"verify":{{"type":"return_code_eq","command":"verify cmd","expected_code":0}}}}
+  {{"id":"a1","name":"description","execute":{{"type":"run_shell","command":"actual cmd"}},"verify":{{"type":"return_code_eq","command":"verify cmd","expected_code":0}}}},
+  {{"id":"a2","name":"Create index.html","execute":{{"type":"write_file","path":"/var/www/site/index.html","description":"Black themed tech landing page for LittleAnt"}},"verify":{{"type":"file_exists","path":"/var/www/site/index.html"}}}}
 ]}}
 
 Rules:
 - execute.type: run_shell, write_file, make_dir, read_file, http_request
+- For write_file: ONLY include "path" and "description". Do NOT include file content in JSON. Content will be generated separately.
+- For modify_file: use type "write_file" with "path" and "description" explaining the changes needed. The program will read the current file first.
 - verify: check EFFECT not ARTIFACT. All params must be filled.
-- Keep minimal. 1-5 commands max."""
+- Keep minimal. 1-8 commands max.
+- Do NOT add extras the user didn't ask for (no SSL, no firewall, no security hardening unless explicitly requested)."""
+
+# ============================================================
+# Phase 5b: Generate file content (plain text, no JSON)
+# ============================================================
+PROMPT_WRITE_FILE_CONTENT = """Generate the complete file content for:
+
+Path: {path}
+Description: {description}
+
+=== TASK CONTEXT ===
+{task_brief}
+
+Output ONLY the raw file content. No markdown code blocks, no explanations, no JSON wrapping.
+Start directly with the file content and end with the file content. Nothing else."""
+
+PROMPT_MODIFY_FILE_CONTENT = """Modify this file according to the requirements.
+
+Path: {path}
+Changes needed: {description}
+
+=== CURRENT FILE CONTENT ===
+{current_content}
+
+=== TASK CONTEXT ===
+{task_brief}
+
+Output ONLY the complete modified file content. No markdown code blocks, no explanations, no JSON wrapping.
+Start directly with the file content and end with the file content. Nothing else."""
+
+# ============================================================
+# V14 Linear Mode: one-shot plan based on system snapshot
+# ============================================================
+PROMPT_LINEAR_PLAN = """Based on the system snapshot, plan all steps to complete this task.
+
+=== TASK ===
+{user_request}
+
+=== SYSTEM SNAPSHOT ===
+{snapshot}
+
+Reply JSON:
+{{"files_to_create":[
+  {{"path":"/var/www/site/index.html","description":"Main page with black tech theme"}},
+  {{"path":"/etc/nginx/sites-available/mysite","description":"Nginx server block for mysite.com"}}
+],
+"files_to_modify":[
+  {{"path":"/etc/nginx/nginx.conf","description":"Add gzip compression settings"}}
+],
+"commands_before":[
+  {{"id":"pre1","name":"Create web directory","command":"mkdir -p /var/www/site","verify":"test -d /var/www/site"}}
+],
+"commands_after":[
+  {{"id":"post1","name":"Enable site","command":"ln -sf /etc/nginx/sites-available/mysite /etc/nginx/sites-enabled/","verify":"test -L /etc/nginx/sites-enabled/mysite"}},
+  {{"id":"post2","name":"Test and reload nginx","command":"nginx -t && systemctl reload nginx","verify":"curl -s -o /dev/null -w '%{{http_code}}' http://localhost | grep -q 200"}}
+]}}
+
+Rules:
+- commands_before: shell commands to run BEFORE writing files (mkdir, install, etc.)
+- files_to_create: new files. Only path + description. Content will be generated separately.
+- files_to_modify: existing files to change. Only path + description.
+- commands_after: shell commands to run AFTER files are written (enable site, reload, etc.)
+- Keep it minimal. Only what the user asked for. No SSL, no firewall, no extras unless explicitly requested.
+- verify: a single shell command that returns 0 on success."""
+
+PROMPT_BATCH_FILES = """Generate ALL the following files in one response.
+
+=== TASK ===
+{user_request}
+
+=== SYSTEM SNAPSHOT ===
+{snapshot}
+
+=== FILES TO GENERATE ===
+{file_list}
+
+Output each file using this EXACT format:
+
+===FILE: /full/path/to/file===
+(complete file content here)
+===END_FILE===
+
+===FILE: /full/path/to/next/file===
+(complete file content here)
+===END_FILE===
+
+Rules:
+- Output ONLY the files in the format above. No explanations, no commentary.
+- Each file must have the ===FILE: path=== header and ===END_FILE=== footer.
+- File content must be complete and production-ready.
+- Do NOT wrap content in markdown code blocks."""
 
 # ============================================================
 # Phase 6: Review commands before execution

@@ -1,4 +1,4 @@
-"""LittleAnt V13 - Read-Only Executor for Front-end AI"""
+"""LittleAnt V14 - Read-Only Executor for Front-end AI"""
 from __future__ import annotations
 import subprocess, logging
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LittleAnt V13 - Telegram Bot (Cycle Execution Architecture)
+LittleAnt V14 - Telegram Bot (Dual Execution Architecture)
 Flow: query → judge → act → query → ... → goal met
 Three-level recovery: L1 command → L2 diagnose → L3 redesign
 """
@@ -524,40 +524,30 @@ def main():
                     bot.send_message(cid, t("exec_failed"))
                 return
 
-            # Mixed tasks: design steps → cycle model
-            task_brief = orch.design_steps(task_desc, types)
-            task_brief = orch.do_think_steps(task_brief)
-
-            # Show plan
-            steps = task_brief.get("planned_steps", [])
-            step_lines = []
-            for step in steps:
-                dep = f" (after {step['depends_on']})" if step.get("depends_on") else ""
-                done = f" → {step['conclusion'][:80]}" if step.get("conclusion") else ""
-                step_lines.append(f"  {step['step']}. [{step['type']}] {step['name']}{dep}{done}")
-            bot.send_message(cid, f"📋 Plan ({len(steps)} steps):\n" + "\n".join(step_lines))
-
+            # Create/modify tasks: V14 linear mode (query scan → one-shot plan → batch files → execute)
+            task_brief = {
+                "user_request": task_desc, "command_types": types,
+                "ai_model": getattr(ai, "model", "unknown"), "planned_steps": [],
+            }
             project = orch.create_project(task_brief)
             s.current_project_id = project.id
 
             def on_confirm(plan_text):
-                # Already authorized (user clicked confirm/auto at task creation)
                 if s.authorized:
                     if s.auto_mode:
                         bot.send_message(cid, t("auto_mode_progress", message="executing..."))
                     else:
-                        bot.send_message(cid, f"⏳ Executing:\n{plan_text[:300]}")
+                        bot.send_message(cid, f"⏳ Executing:\n{plan_text[:500]}")
                     return True
-                # Should not reach here, but handle gracefully
                 return True
 
             def on_status(msg):
                 if s.auto_mode:
-                    pass  # Silent in auto mode, report at end
+                    pass  # Silent in auto mode
                 else:
                     bot.send_message(cid, f"⏳ {msg}")
 
-            result = orch.run_cycle(
+            result = orch.run_linear(
                 project, on_confirm=on_confirm, on_status=on_status)
 
             if result == "completed":
@@ -631,7 +621,7 @@ def main():
 
     # ======== Start ========
     logger.info("=" * 50)
-    logger.info("LittleAnt V13 - Cycle Execution Architecture")
+    logger.info("LittleAnt V14 - Dual Execution Architecture")
     logger.info(f"Language: {config.get('language','en')} | AI: {config.get('ai_provider','?')}")
     logger.info("=" * 50)
     bot.start_polling()

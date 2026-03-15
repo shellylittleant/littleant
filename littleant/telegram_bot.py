@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Telegram Bot
+LittleAnt V14 - Telegram Bot
 User communicates with AI butler via Telegram.
 Pure stdlib, no third-party dependencies
 """

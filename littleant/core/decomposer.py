@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Recursive Decomposition Engine
+LittleAnt V14 - Recursive Decomposition Engine
 Depth-first, no depth limit, safety valves as backstop.
 """
 from __future__ import annotations

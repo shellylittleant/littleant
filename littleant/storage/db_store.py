@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Database Storage
+LittleAnt V14 - Database Storage
 Execution logs in DB. Template library with user feedback. Tool library.
 """
 from __future__ import annotations

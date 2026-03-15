@@ -1,10 +1,10 @@
-# LittleAnt V13 — Whitepaper
+# LittleAnt V14 — Whitepaper
 
 **AI Intent Execution System**
 
 *Compile natural language intent into executable, verifiable, recoverable real-world actions via cycle-based execution.*
 
-V13 | March 15, 2026 | Cycle Execution Architecture
+V14 | March 15, 2026 | Cycle Execution Architecture
 
 ---
 
@@ -14,9 +14,9 @@ V13 | March 15, 2026 | Cycle Execution Architecture
 - **V11**: "AI Minimization" — right direction but stayed at the principle level. Lacked engineering details for task chain generation, user interaction, and error recovery.
 - **V12**: Established dual AI architecture: front-end AI (chat) + back-end AI (execute) + recursive decomposition + mechanical verification + command protocol.
 - **V12.1**: Improved V12 with autonomous recovery, verify effect principle, template library.
-- **V13**: Architecture-level change. Replaced recursive decomposition with **cycle-based execution model**: query → judge → act → repeat. Three-level recovery (L1 command / L2 diagnostic / L3 redesign). Dynamic query commands. Task brief as project specification.
+- **V14**: Architecture-level change. Replaced recursive decomposition with **cycle-based execution model**: query → judge → act → repeat. Three-level recovery (L1 command / L2 diagnostic / L3 redesign). Dynamic query commands. Task brief as project specification.
 
-### V13 Core Changes (from V12.1)
+### V14 Core Changes (from V12.1)
 
 - **Cycle execution model**: No more one-shot decomposition. System runs in cycles: scan system state → AI judges gap to goal → AI writes action → execute → rescan. Every decision is based on real data, not predictions.
 - **Dynamic query commands**: Query commands are not fixed. Each cycle, AI decides what to check based on what the next action needs. Queries serve decisions, not the other way around.
@@ -289,11 +289,11 @@ Background execution doesn't flood the user with messages. Progress is written t
 
 ---
 
-## 13. V8 / V11 / V13 Comparison
+## 13. V8 / V11 / V14 Comparison
 
-| Dimension | V8 | V11 | V13 |
+| Dimension | V8 | V11 | V14 |
 |-----------|-----|------|-------|
-| Dimension | V8 | V11 | V12.1 | V13 |
+| Dimension | V8 | V11 | V12.1 | V14 |
 |-----------|-----|------|-------|-----|
 | AI roles | 5+ (PM, planner, reviewer, executor, auditor) | 2 (Planner, Reviewer) | 2 (Front-end read-only + Back-end execute) | 2 (Front-end chat + Back-end execute) |
 | Execution model | PM AI + 4-role pipeline | Planner AI one-shot | Recursive decomposition, layer by layer | Cycle: query → judge → act → repeat |
@@ -305,4 +305,4 @@ Background execution doesn't flood the user with messages. Progress is written t
 
 ---
 
-*— V13 - Cycle Execution Architecture —*
+*— V14 - Cycle Execution Architecture —*

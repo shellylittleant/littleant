@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Command Protocol
+LittleAnt V14 - Command Protocol
 AI->Program commands (keyboard) and Program->AI feedback (display).
 Format validation: valid format? required fields? values in range?
 """

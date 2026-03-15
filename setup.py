@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LittleAnt V13 - Setup Wizard"""
+"""LittleAnt V14 - Setup Wizard"""
 import json, os, sys
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "littleant", "config.json")
@@ -50,7 +50,7 @@ def test_api_key(base_url, model, api_key, timeout=15):
 
 def setup():
     print("\n" + "=" * 42)
-    print("  LittleAnt V13 - Setup")
+    print("  LittleAnt V14 - Setup")
     print("=" * 42 + "\n")
 
     print("Select language / 选择语言:")

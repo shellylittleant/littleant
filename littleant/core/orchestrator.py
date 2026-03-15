@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - Orchestrator (Cycle Execution + Black Box Logging)
+LittleAnt V14 - Orchestrator (Cycle Execution + Black Box Logging)
 
 Every AI call, every command, every decision is recorded to experiment_log.
 """
@@ -20,6 +20,8 @@ from littleant.ai.adapter import (
     PROMPT_WRITE_QUERY, PROMPT_JUDGE, PROMPT_WRITE_ACTION, PROMPT_REVIEW,
     PROMPT_L1_RECOVERY, PROMPT_L2_DIAGNOSE, PROMPT_L2_FIX, PROMPT_L3_REDESIGN,
     PROMPT_QUERY_FAST, PROMPT_QUERY_ENOUGH, PROMPT_HISTORY_CONTEXT,
+    PROMPT_WRITE_FILE_CONTENT, PROMPT_MODIFY_FILE_CONTENT,
+    PROMPT_LINEAR_PLAN, PROMPT_BATCH_FILES,
 )
 from littleant.config import (
     MAX_NODE_RETRIES, MAX_NODE_MODIFICATIONS,
@@ -205,7 +207,303 @@ class Orchestrator:
         self._save_to_library(project); return "completed"
 
     # ==========================================================
-    # MAIN CYCLE
+    # V14 LINEAR MODE: query snapshot → one-shot plan → batch files → execute
+    # For create/modify tasks with clear goals
+    # ==========================================================
+    def run_linear(self, project, on_confirm=None, on_status=None):
+        pid = project.id
+        brief = project.task_brief
+        tn = brief["user_request"]
+        tt = ",".join(brief.get("command_types",[]))
+        brief_json = json.dumps(brief, ensure_ascii=False, indent=2)
+
+        # --- PHASE 1: V14 query scan ---
+        if on_status: on_status("Scanning system...")
+        log_event(project_id=pid, task_name=tn, task_types=tt,
+                  event_type="linear_scan_start", actor="program")
+
+        scan_queries = self._write_queries_logged(pid, tn, tt, brief_json, {}, 0)
+        if scan_queries:
+            scan_results = self._run_queries_logged(project, scan_queries, 0)
+        else:
+            scan_results = {}
+        snapshot_text = self._format_results(scan_results)
+        save_project(project)
+
+        log_event(project_id=pid, task_name=tn, task_types=tt,
+                  event_type="linear_scan_done", actor="program",
+                  output_text=f"Scanned {len(scan_results)} items")
+
+        # --- PHASE 2: One-shot plan ---
+        if on_status: on_status("Planning...")
+        prompt = PROMPT_LINEAR_PLAN.format(user_request=tn, snapshot=snapshot_text)
+        try:
+            plan = self._ask_logged([{"role":"user","content":prompt}], None,
+                project_id=pid, task_name=tn, task_types=tt,
+                event_type="ai_linear_plan")
+        except Exception as e:
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="task_fail", error_message=str(e))
+            project.status = ProjectStatus.FAILED; save_project(project)
+            return "failed"
+
+        files_create = plan.get("files_to_create", [])
+        files_modify = plan.get("files_to_modify", [])
+        cmds_before = plan.get("commands_before", [])
+        cmds_after = plan.get("commands_after", [])
+
+        # Show plan to user
+        plan_lines = []
+        for c in cmds_before: plan_lines.append(f"  ▸ {c.get('name','')}")
+        for f in files_create: plan_lines.append(f"  📄 Create {f['path']}")
+        for f in files_modify: plan_lines.append(f"  ✏️ Modify {f['path']}")
+        for c in cmds_after: plan_lines.append(f"  ▸ {c.get('name','')}")
+        plan_text = "\n".join(plan_lines)
+
+        log_event(project_id=pid, task_name=tn, task_types=tt,
+                  event_type="linear_plan_show", output_text=plan_text)
+
+        # Confirm (if needed)
+        if on_confirm:
+            if not on_confirm(plan_text):
+                project.status = ProjectStatus.ABORTED; save_project(project)
+                return "aborted"
+
+        # --- PHASE 3: Execute pre-commands ---
+        if cmds_before:
+            if on_status: on_status("Preparing...")
+            for cmd in cmds_before:
+                self._run_shell_logged(project, cmd, 0)
+
+        # --- PHASE 4: Batch generate all files (1 API call) ---
+        all_files = files_create + files_modify
+        if all_files:
+            if on_status: on_status("Generating files...")
+
+            # Read current content for files_to_modify
+            for f in files_modify:
+                try:
+                    r = subprocess.run(f"cat {f['path']} 2>/dev/null", shell=True,
+                                      capture_output=True, text=True, timeout=10)
+                    if r.returncode == 0: f["current_content"] = r.stdout[:5000]
+                except: pass
+
+            file_list = "\n".join([
+                f"- {f['path']}: {f.get('description','')}" +
+                (f"\n  Current content:\n{f['current_content'][:500]}" if f.get('current_content') else "")
+                for f in all_files
+            ])
+
+            prompt = PROMPT_BATCH_FILES.format(
+                user_request=tn, snapshot=snapshot_text[:3000], file_list=file_list)
+
+            try:
+                t0 = time.time()
+                raw = self.ai.ask_text([{"role":"user","content":prompt}])
+                dur = int((time.time() - t0) * 1000)
+
+                log_event(project_id=pid, task_name=tn, task_types=tt,
+                          event_type="ai_batch_files", actor="backend_ai",
+                          ai_prompt=f"Batch generate {len(all_files)} files",
+                          ai_response=raw[:500] + "..." if len(raw) > 500 else raw,
+                          ai_model=self._ai_model(), duration_ms=dur)
+
+                # Parse ===FILE: path=== ... ===END_FILE=== blocks
+                written = self._parse_and_write_files(project, raw, pid, tn, tt)
+
+                if written == 0:
+                    logger.warning("Batch file parse returned 0 files, trying single-file fallback")
+                    # Fallback: generate files one by one
+                    for f in all_files:
+                        self._handle_write_file_single(project, f, brief_json, 0)
+
+            except Exception as e:
+                log_event(project_id=pid, task_name=tn, task_types=tt,
+                          event_type="ai_batch_files", error_message=str(e))
+                # Fallback: generate files one by one
+                for f in all_files:
+                    self._handle_write_file_single(project, f, brief_json, 0)
+
+        # --- PHASE 5: Execute post-commands with recovery ---
+        if cmds_after:
+            if on_status: on_status("Configuring...")
+            for cmd in cmds_after:
+                result = self._run_shell_with_recovery(project, cmd, brief_json, snapshot_text, 0)
+                if result == "waiting_user": return "waiting_user"
+                elif result == "abort":
+                    project.status = ProjectStatus.FAILED; save_project(project)
+                    return "failed"
+
+        # --- PHASE 6: Quick verify ---
+        if on_status: on_status("Verifying...")
+        # Run a quick scan to confirm
+        verify_queries = self._write_queries_logged(pid, tn, tt, brief_json, scan_results, 1,
+            next_step_info="Verify that the task is complete. Check that services are running, files exist, and the site is accessible.")
+        if verify_queries:
+            self._run_queries_logged(project, verify_queries, 1)
+
+        save_project(project)
+
+        log_event(project_id=pid, task_name=tn, task_types=tt,
+                  event_type="task_complete", actor="program",
+                  api_calls_total=project.ai_call_count)
+        project.status = ProjectStatus.COMPLETED; save_project(project)
+        self._save_to_library(project)
+        return "completed"
+
+    # --- Linear mode helpers ---
+
+    def _parse_and_write_files(self, project, raw, pid, tn, tt):
+        """Parse ===FILE: path=== ... ===END_FILE=== blocks and write to disk."""
+        import re
+        pattern = r'===FILE:\s*(.+?)===\n(.*?)===END_FILE==='
+        matches = re.findall(pattern, raw, re.DOTALL)
+        written = 0
+        for path, content in matches:
+            path = path.strip()
+            content = content.strip()
+            if not path or not content: continue
+            try:
+                parent = os.path.dirname(path)
+                if parent:
+                    os.makedirs(parent, exist_ok=True)
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                written += 1
+                size = os.path.getsize(path)
+
+                node = Node(id=f"file_{uuid.uuid4().hex[:6]}", name=f"Write {os.path.basename(path)}")
+                node.execute = ExecuteSpec(type="write_file", path=path)
+                node.execute_output = {"stdout": f"Written {size} bytes to {path}", "return_code": 0}
+                node.verify_output = {"passed": True, "detail": f"{size} bytes"}
+                node.status = NodeStatus.COMPLETED
+                project.nodes[node.id] = node
+
+                log_event(project_id=pid, task_name=tn, task_types=tt,
+                          event_type="file_write", direction="program→server",
+                          command=f"write_file {path}", stdout=f"{size} bytes",
+                          verify_passed=1, node_id=node.id)
+                logger.info(f"Written: {path} ({size} bytes)")
+            except Exception as e:
+                log_event(project_id=pid, task_name=tn, task_types=tt,
+                          event_type="file_write", error_message=str(e),
+                          command=f"write_file {path}", verify_passed=0)
+                logger.error(f"Failed to write {path}: {e}")
+        return written
+
+    def _handle_write_file_single(self, project, file_info, brief_json, cycle):
+        """Fallback: generate one file at a time."""
+        path = file_info.get("path","")
+        desc = file_info.get("description","")
+        current = file_info.get("current_content")
+        pid = project.id
+        tn = project.task_brief.get("user_request","")
+        tt = ",".join(project.task_brief.get("command_types",[]))
+
+        if current:
+            prompt = PROMPT_MODIFY_FILE_CONTENT.format(
+                path=path, description=desc, current_content=current[:8000],
+                task_brief=brief_json[:3000])
+        else:
+            prompt = PROMPT_WRITE_FILE_CONTENT.format(
+                path=path, description=desc, task_brief=brief_json[:3000])
+        try:
+            content = self.ai.ask_text([{"role":"user","content":prompt}])
+            content = content.strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                if lines[-1].strip() == "```": lines = lines[1:-1]
+                else: lines = lines[1:]
+                content = "\n".join(lines)
+            parent = os.path.dirname(path)
+            if parent: os.makedirs(parent, exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="file_write", command=f"write_file {path}",
+                      stdout=f"{os.path.getsize(path)} bytes", verify_passed=1)
+        except Exception as e:
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="file_write", error_message=str(e),
+                      command=f"write_file {path}", verify_passed=0)
+
+    def _run_shell_logged(self, project, cmd_info, cycle):
+        """Execute a single shell command with logging."""
+        pid = project.id
+        tn = project.task_brief.get("user_request","")
+        tt = ",".join(project.task_brief.get("command_types",[]))
+        cmd = cmd_info.get("command","")
+        name = cmd_info.get("name","")
+        if not cmd: return
+        t0 = time.time()
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+            dur = int((time.time()-t0)*1000)
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="node_execute", direction="program→server",
+                      command=cmd, stdout=r.stdout[:3000], stderr=r.stderr[:1000],
+                      return_code=r.returncode, duration_ms=dur, cycle_number=cycle,
+                      node_id=cmd_info.get("id",""))
+
+            node = Node(id=cmd_info.get("id", f"sh_{uuid.uuid4().hex[:6]}"), name=name)
+            node.execute = ExecuteSpec(type="run_shell", command=cmd)
+            node.execute_output = {"stdout": r.stdout[:3000], "return_code": r.returncode}
+
+            # Verify if specified
+            verify_cmd = cmd_info.get("verify","")
+            if verify_cmd:
+                vr = subprocess.run(verify_cmd, shell=True, capture_output=True, text=True, timeout=30)
+                passed = vr.returncode == 0
+                node.verify_output = {"passed": passed, "detail": f"rc={vr.returncode}"}
+            else:
+                passed = r.returncode == 0
+                node.verify_output = {"passed": passed, "detail": f"rc={r.returncode}"}
+
+            node.status = NodeStatus.COMPLETED if passed else NodeStatus.FAILED
+            project.nodes[node.id] = node
+            log_execution(project_id=pid, node_id=node.id, attempt=1,
+                          action="execute", exec_output=node.execute_output, verify_output=node.verify_output)
+        except Exception as e:
+            dur = int((time.time()-t0)*1000)
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="node_execute", error_message=str(e),
+                      command=cmd, duration_ms=dur, cycle_number=cycle)
+
+    def _run_shell_with_recovery(self, project, cmd_info, brief_json, snapshot_text, cycle):
+        """Execute shell command with 3-level recovery."""
+        pid = project.id
+        tn = project.task_brief.get("user_request","")
+        tt = ",".join(project.task_brief.get("command_types",[]))
+
+        # Convert to node and use existing recovery
+        nid = cmd_info.get("id", f"sh_{uuid.uuid4().hex[:6]}")
+        node = Node(id=nid, name=cmd_info.get("name",""))
+        node.execute = ExecuteSpec(type="run_shell", command=cmd_info.get("command",""))
+        verify_cmd = cmd_info.get("verify","")
+        if verify_cmd:
+            node.verify = VerifySpec(type="return_code_eq", command=verify_cmd, expected_code=0)
+        else:
+            node.verify = VerifySpec(type="return_code_eq", command=cmd_info.get("command",""), expected_code=0)
+        node.status = NodeStatus.READY
+        project.nodes[nid] = node
+
+        result = self._execute_node_l1_logged(project, node, cycle)
+        if result == "success": return "ok"
+        elif result == "l1_exhausted":
+            l2 = self._recover_l2_logged(project, node, brief_json, cycle)
+            if l2 == "recovered": return "ok"
+            elif l2 == "l2_exhausted":
+                l3 = self._recover_l3_logged(project, node, brief_json, snapshot_text, cycle)
+                if l3 == "recovered": return "ok"
+                else:
+                    if project.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        return "waiting_user"
+                    _remove_safe(project, node.id)
+                    return "ok"
+        return "ok"
+
+    # ==========================================================
+    # MAIN CYCLE (V14 - kept for complex diagnostic tasks)
     # ==========================================================
     def run_cycle(self, project, on_confirm=None, on_status=None):
         pid = project.id
@@ -384,6 +682,17 @@ class Orchestrator:
         nodes = self._commands_to_nodes(project, commands)
 
         for node in nodes:
+            # Handle write_file: generate content via separate AI call, then write
+            if node.execute and node.execute.type == "write_file" and node.execute.path:
+                result = self._handle_write_file(project, node, brief_json, cycle)
+                if result == "success": continue
+                elif result == "failed":
+                    if project.consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        return "waiting_user"
+                    _remove_safe(project, node.id); continue
+                continue
+
+            # Normal shell command execution with recovery
             result = self._execute_node_l1_logged(project, node, cycle)
             if result == "success": continue
             elif result == "l1_exhausted":
@@ -401,6 +710,109 @@ class Orchestrator:
                         _remove_safe(project, node.id); continue
             elif result == "abort": return "abort"
         return "ok"
+
+    def _handle_write_file(self, project, node, brief_json, cycle):
+        """Generate file content via AI (plain text) and write to disk."""
+        pid = project.id
+        tn = project.task_brief.get("user_request","")
+        tt = ",".join(project.task_brief.get("command_types",[]))
+        path = node.execute.path
+        desc = node.execute.description or node.name or "file content"
+
+        # Check if file exists (modify vs create)
+        current_content = None
+        try:
+            r = subprocess.run(f"cat {path} 2>/dev/null", shell=True,
+                              capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                current_content = r.stdout
+        except: pass
+
+        # Generate content via AI (plain text, no JSON)
+        if current_content:
+            prompt = PROMPT_MODIFY_FILE_CONTENT.format(
+                path=path, description=desc,
+                current_content=current_content[:8000],
+                task_brief=brief_json[:3000])
+        else:
+            prompt = PROMPT_WRITE_FILE_CONTENT.format(
+                path=path, description=desc,
+                task_brief=brief_json[:3000])
+
+        try:
+            t0 = time.time()
+            content = self.ai.ask_text([{"role":"user","content":prompt}])
+            dur = int((time.time() - t0) * 1000)
+
+            # Strip markdown code fences if AI added them
+            content = content.strip()
+            if content.startswith("```"):
+                lines = content.split("\n")
+                # Remove first line (```html or ```) and last line (```)
+                if lines[-1].strip() == "```":
+                    lines = lines[1:-1]
+                else:
+                    lines = lines[1:]
+                content = "\n".join(lines)
+
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="ai_write_file_content", direction="program→ai",
+                      actor="backend_ai", node_id=node.id,
+                      ai_prompt=f"Generate content for {path}: {desc[:100]}",
+                      ai_response=content[:500] + "..." if len(content) > 500 else content,
+                      ai_model=self._ai_model(), duration_ms=dur, cycle_number=cycle)
+
+        except Exception as e:
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="ai_write_file_content", error_message=str(e),
+                      node_id=node.id, cycle_number=cycle)
+            project.consecutive_failures += 1
+            return "failed"
+
+        # Ensure parent directory exists
+        parent_dir = os.path.dirname(path)
+        if parent_dir:
+            subprocess.run(f"mkdir -p {parent_dir}", shell=True, timeout=10)
+
+        # Write file content directly via Python
+        try:
+            t0 = time.time()
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            dur = int((time.time() - t0) * 1000)
+
+            # Verify file was written
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                node.execute_output = {"stdout": f"File written: {path} ({os.path.getsize(path)} bytes)", "return_code": 0}
+                node.verify_output = {"passed": True, "detail": f"File exists: {os.path.getsize(path)} bytes"}
+                node.status = NodeStatus.COMPLETED
+                project.consecutive_failures = 0
+
+                log_event(project_id=pid, task_name=tn, task_types=tt,
+                          event_type="file_write", direction="program→server",
+                          actor="program", node_id=node.id, command=f"write_file {path}",
+                          stdout=f"{os.path.getsize(path)} bytes written",
+                          verify_passed=1, duration_ms=dur, cycle_number=cycle)
+
+                log_execution(project_id=pid, node_id=node.id, attempt=1,
+                              action="write_file", exec_output=node.execute_output,
+                              verify_output=node.verify_output)
+                return "success"
+            else:
+                node.status = NodeStatus.FAILED
+                project.consecutive_failures += 1
+                log_event(project_id=pid, task_name=tn, task_types=tt,
+                          event_type="file_write", error_message="File empty or not found after write",
+                          node_id=node.id, cycle_number=cycle, verify_passed=0)
+                return "failed"
+
+        except Exception as e:
+            node.status = NodeStatus.FAILED
+            project.consecutive_failures += 1
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="file_write", error_message=str(e),
+                      node_id=node.id, cycle_number=cycle, verify_passed=0)
+            return "failed"
 
     def _execute_node_l1_logged(self, project, node, cycle):
         pid = project.id

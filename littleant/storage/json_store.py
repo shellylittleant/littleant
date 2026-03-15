@@ -1,5 +1,5 @@
 """
-LittleAnt V13 - JSON Storage
+LittleAnt V14 - JSON Storage
 Project tree and execution chain stored as JSON files.
 """
 from __future__ import annotations

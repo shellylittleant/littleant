@@ -1,6 +1,6 @@
 {
   "bot_welcome": "👋 {name}, I'm LittleAnt AI Butler!\n\nChat with me or ask me to run tasks on your server.\nSay \"help me install xxx\" to start a task.\n\n/status - Task progress\n/cancel - Cancel task",
-  "bot_help": "🐜 LittleAnt V13\n\nChat → send a message\nCheck status → \"what's in crontab\" \"disk space\"\nRun task → \"help me install nginx\"\n\n/status - Progress\n/cancel - Cancel",
+  "bot_help": "🐜 LittleAnt V14\n\nChat → send a message\nCheck status → \"what's in crontab\" \"disk space\"\nRun task → \"help me install nginx\"\n\n/status - Progress\n/cancel - Cancel",
   "no_task": "📭 No active task",
   "task_cancelled": "🛑 Cancelled",
   "task_status": "📊 {status}",

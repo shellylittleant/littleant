@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "=========================================="
-echo " LittleAnt V13"
+echo " LittleAnt V14"
 echo "=========================================="
 python3 --version 2>/dev/null || { echo "❌ Python 3.10+ required"; exit 1; }
 echo "✅ Python ready (zero dependencies)"

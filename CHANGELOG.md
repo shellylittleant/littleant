@@ -1,78 +1,57 @@
 # Changelog
 
+## V14 — 2026-03-15
+
+### Dual Execution Architecture (V13 query + V14 linear)
+- **Query tasks** use V13 cycle model: query → judge → supplement → report
+- **Create/modify tasks** use V14 linear model: scan → plan → batch files → execute → verify
+- System scan (V13) is always the first step for any task — AI sees real environment before acting
+
+### Batch File Generation
+- File content no longer passes through JSON (solves JSON parsing failures with HTML/CSS)
+- All files generated in one API call using ===FILE: path=== / ===END_FILE=== format
+- Program writes files directly via Python open().write() — no shell heredoc, no escaping issues
+- Fallback: if batch parse fails, generates files one at a time
+
+### Judge Scope Control
+- AI cannot add requirements the user didn't ask for (no unsolicited SSL, DNS, firewall, etc.)
+- "Perfection is the enemy of done" — core deliverables complete = task complete
+
+### One-Time Authorization
+- User authorizes task once at creation, no repeated confirmations during execution
+- 4 buttons: [✅ Confirm] [⚡ Auto-execute] [✏️ Modify task] [❌ Cancel]
+- Auto-execute: fully silent, report at end
+- Risk assessment shown upfront (medium for create/modify, high for delete operations)
+
+### User Feedback System
+- After task completion: [✅ Satisfied] [❌ Not satisfied]
+- Unsatisfied → prompt for specific reason, stored in DB
+- History search before each task: successful patterns as reference, failed patterns as warnings
+
+### Experiment Log (Black Box)
+- 28-column experiment_log table records every interaction
+- 31 event types covering: user messages, AI prompts/responses, commands, stdout/stderr, verify results, recovery decisions
+- All data exportable via SQL for paper/research
+
+### Other
+- Query fast path: pure query tasks complete in 2-4 API calls
+- Three-level recovery shared across both execution modes
+
+---
+
 ## V13 — 2026-03-15
 
-### Cycle Execution Model (architecture change)
-- Replaced recursive decomposition with **cycle-based execution**: query → judge → act → query → ... → goal met
-- Each cycle: scan system state → AI compares with goal → AI decides action → execute → rescan
-- No more one-shot planning. Every action is based on real, current system data
-- Dynamic query commands: AI adjusts what to check each cycle based on what the next action needs
-
-### Task Brief (project specification)
-- Every task now has a **task_brief**: user request + command types + AI-designed steps + conclusions
-- Task brief is passed to AI on every call — AI never loses context or forgets the goal
-- Think steps: AI reasoning that happens during planning, conclusions guide subsequent actions
-
-### Type-Driven Task Classification
-- Tasks classified as query / create / modify before execution
-- Pure query tasks skip user confirmation (zero risk, fast track)
-- Mixed tasks: query phases run automatically, create/modify phases need user approval
-
-### Three-Level Recovery
-- **L1 (command level)**: retry + modify within the execution chain. 2 retries, 2 modifications
-- **L2 (diagnostic)**: run diagnostic queries to understand why it failed, then write alternative approach. 3 attempts
-- **L3 (redesign)**: gather expanded system info, AI designs fundamentally different approach. 2 attempts
-- Every recovery level starts with a query — diagnose before acting, never guess
-- Only asks user after all 3 levels exhausted (up to 9 attempts per step)
-
-### AI Model Switching via Telegram
-- `/model` command: switch AI provider from within Telegram chat
-- Supports: OpenAI GPT-4o, DeepSeek, Claude, Gemini, Grok
-- API key validated before saving (test request). Keys stored per provider
-- Hot-switch: no restart needed
-
-### DeepSeek Support
-- Added DeepSeek (deepseek-chat) as AI provider option
-- OpenAI-compatible API, lower cost, relaxed rate limits
-
-### Improved Rate Limiting
-- API call interval: 1.5s → 3s (prevents 429 on lower-tier accounts)
-- Retry attempts: 3 → 5
-- Project AI call limit: 100 → 1000
-
-### UX Improvements
-- Quick query failures no longer show technical errors — gracefully suggests creating a task
-- Telegram reply/quote support: AI sees quoted message context
-- Image support: photos analyzed via AI vision API
-- File support: text files read and sent as context to AI
-
-### No More Recursive Stack Overflow
-- `_execute_node` rewritten from recursion to loop (max 10 attempts hard cap)
+### Cycle Execution Model
+- query → judge → act → query → ... → goal met
+- Dynamic query commands, Task Brief, type-driven classification
+- Three-level recovery: L1 command → L2 diagnose → L3 redesign
+- DeepSeek support, AI model hot-switching
 
 ---
 
 ## V12.1 — 2026-03-14
 
 ### Dual AI Architecture
-- Front-end AI (chat): read-only access, 20-turn memory, natural language interaction
-- Back-end AI (execution): JSON-only communication, full read-write access
-
-### Recursive Decomposition
-- Tasks broken down layer by layer until every branch is a single executable command
-- Depth-first traversal, safety valves as backstop
-
-### Mechanical Verification
-- 8 verifier types, zero AI tokens
-- Verify effect principle: check the effect of an action, not the artifact
-
-### Multi-Provider AI Support
-- OpenAI GPT-4o, Anthropic Claude, Google Gemini, xAI Grok
-
-### Multi-Language Support
-- English and Chinese interface via i18n JSON files
-
-### Other
-- Zero third-party Python dependencies
-- Interactive setup wizard
-- systemd service file
-- Telegram bot menu auto-configured on startup
+- Front-end AI (chat, read-only) + Back-end AI (execution, read-write)
+- Recursive decomposition, mechanical verification, effect principle
+- Multi-provider AI support, multi-language, zero dependencies
