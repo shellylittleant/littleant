@@ -1,5 +1,45 @@
 # Changelog
 
+## V14.1 — 2026-06-12 (evaluation fixes)
+
+Security and measurement-integrity fixes from the code audit. No architectural change.
+
+### Security
+- **Access control (was missing entirely)**: the bot now enforces an admin allowlist.
+  First contact auto-registers the sole admin; everyone else is denied until added via
+  `/addadmin <chat_id>`. Guards added to every message, callback, and command entry point.
+  Admins persist in `config.json` under `admin_chat_ids`.
+- **Read-only sandbox hardening**: removed interpreters (`python`/`python3`/`php`/`node`),
+  `awk`, and `find` from the read-only whitelist — they can execute arbitrary code or write
+  files, which a substring blacklist cannot contain.
+
+### Measurement integrity (experiment log)
+- **Token usage is now recorded**: both adapters parse `usage` from the API response and
+  every AI call logs `api_tokens_in`/`api_tokens_out` (previously always 0).
+- **Accurate per-task AI call count**: `api_calls_total` is now derived from the black box
+  (`count_ai_calls`, counting `ai_*` events) instead of the legacy in-memory counter that
+  was never incremented on the V14 paths (previously 0 for every real run).
+- **Linear-mode task success is now mechanical**: added a final verification gate that
+  re-checks every created file (exists & non-empty) and re-runs every post-command verify
+  (return code 0). Tasks now return `completed`/`failed` based on real effects rather than
+  unconditionally reporting success.
+- **Verifiers are fail-closed**: an under-specified verify spec now fails (and enters
+  recovery) instead of silently passing.
+
+### Correctness
+- **Native Anthropic adapter**: Claude now uses the real Messages API (`/v1/messages`,
+  `x-api-key`, top-level `system`, native image blocks) instead of the OpenAI-compatible
+  path that 404s against `api.anthropic.com`. Provider switching rebuilds the adapter so
+  cross-protocol switches work.
+- **Template library gating**: only mechanically-verified successes are saved; query tasks
+  and failed runs no longer pollute the library (protects the evolution-protocol experiment).
+
+### Engineering
+- SQLite connections use WAL + `busy_timeout=30s` to avoid dropped events under concurrency.
+- `MAX_CYCLES` / `MAX_REVIEW_ROUNDS` moved from hardcoded constants into `config.py`.
+
+---
+
 ## V14 — 2026-03-15
 
 ### Dual Execution Architecture (V13 query + V14 linear)

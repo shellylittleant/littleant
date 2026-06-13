@@ -13,7 +13,7 @@ from littleant.core.verifier import run_verify
 from littleant.storage.json_store import save_project, load_project
 from littleant.storage.db_store import (
     log_execution, save_template, save_tool,
-    search_history_for_context, search_tools, log_event,
+    search_history_for_context, search_tools, log_event, count_ai_calls,
 )
 from littleant.ai.adapter import (
     AIAdapter, PROMPT_CLASSIFY, PROMPT_DESIGN, PROMPT_THINK,
@@ -26,11 +26,10 @@ from littleant.ai.adapter import (
 from littleant.config import (
     MAX_NODE_RETRIES, MAX_NODE_MODIFICATIONS,
     MAX_L2_ATTEMPTS, MAX_L3_ATTEMPTS, MAX_CONSECUTIVE_FAILURES,
+    MAX_CYCLES, MAX_REVIEW_ROUNDS,
 )
 
 logger = logging.getLogger(__name__)
-MAX_CYCLES = 10
-MAX_REVIEW_ROUNDS = 3
 
 
 class Orchestrator:
@@ -50,10 +49,12 @@ class Orchestrator:
             result = self.ai.ask(messages, system_prompt=system_prompt)
             duration = int((time.time() - t0) * 1000)
             response_text = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+            u = getattr(self.ai, "last_usage", {}) or {}
             log_event(project_id=project_id, task_name=task_name, task_types=task_types,
                       event_type=event_type, direction=direction, actor=actor,
                       ai_prompt=prompt_text, ai_response=response_text,
                       ai_model=self._ai_model(), duration_ms=duration,
+                      api_tokens_in=u.get("in", 0), api_tokens_out=u.get("out", 0),
                       cycle_number=cycle_number, recovery_level=recovery_level, node_id=node_id)
             return result
         except Exception as e:
@@ -185,14 +186,14 @@ class Orchestrator:
                 event_type="ai_judge_enough")
         except:
             project.status = ProjectStatus.COMPLETED; save_project(project)
-            self._save_to_library(project); return "completed"
+            self._save_to_library(project, success=False); return "completed"
 
         if r2.get("enough", True):
             log_event(project_id=pid, task_name=tn, task_types=tt,
                       event_type="task_complete", actor="program",
-                      api_calls_total=project.ai_call_count)
+                      api_calls_total=count_ai_calls(pid))
             project.status = ProjectStatus.COMPLETED; save_project(project)
-            self._save_to_library(project); return "completed"
+            self._save_to_library(project, success=False); return "completed"
 
         # Supplement round
         extra_cmds = r2.get("extra_commands", [])
@@ -202,9 +203,9 @@ class Orchestrator:
 
         log_event(project_id=pid, task_name=tn, task_types=tt,
                   event_type="task_complete", actor="program",
-                  api_calls_total=project.ai_call_count)
+                  api_calls_total=count_ai_calls(pid))
         project.status = ProjectStatus.COMPLETED; save_project(project)
-        self._save_to_library(project); return "completed"
+        self._save_to_library(project, success=False); return "completed"
 
     # ==========================================================
     # V14 LINEAR MODE: query snapshot → one-shot plan → batch files → execute
@@ -301,12 +302,14 @@ class Orchestrator:
                 t0 = time.time()
                 raw = self.ai.ask_text([{"role":"user","content":prompt}])
                 dur = int((time.time() - t0) * 1000)
+                u = getattr(self.ai, "last_usage", {}) or {}
 
                 log_event(project_id=pid, task_name=tn, task_types=tt,
                           event_type="ai_batch_files", actor="backend_ai",
                           ai_prompt=f"Batch generate {len(all_files)} files",
                           ai_response=raw[:500] + "..." if len(raw) > 500 else raw,
-                          ai_model=self._ai_model(), duration_ms=dur)
+                          ai_model=self._ai_model(), duration_ms=dur,
+                          api_tokens_in=u.get("in", 0), api_tokens_out=u.get("out", 0))
 
                 # Parse ===FILE: path=== ... ===END_FILE=== blocks
                 written = self._parse_and_write_files(project, raw, pid, tn, tt)
@@ -334,22 +337,73 @@ class Orchestrator:
                     project.status = ProjectStatus.FAILED; save_project(project)
                     return "failed"
 
-        # --- PHASE 6: Quick verify ---
+        # --- PHASE 6: Final mechanical verification gate ---
+        # This is the task-level success decision. It must be MECHANICAL, not the
+        # AI's "I think I'm done". We re-check every created file (exists & non-empty)
+        # and re-run every post-command's verify command (return code 0). Only if all
+        # pass do we report completion. (See evaluation report E1.)
         if on_status: on_status("Verifying...")
-        # Run a quick scan to confirm
+
+        # Informational scan (logged; not used as the success signal)
         verify_queries = self._write_queries_logged(pid, tn, tt, brief_json, scan_results, 1,
             next_step_info="Verify that the task is complete. Check that services are running, files exist, and the site is accessible.")
         if verify_queries:
             self._run_queries_logged(project, verify_queries, 1)
 
+        ok, failures = self._final_verify_linear(project, all_files, cmds_after, pid, tn, tt)
         save_project(project)
+
+        if not ok:
+            log_event(project_id=pid, task_name=tn, task_types=tt,
+                      event_type="task_fail", actor="program",
+                      api_calls_total=count_ai_calls(pid),
+                      error_message="; ".join(failures)[:2000])
+            project.status = ProjectStatus.FAILED; save_project(project)
+            # Do NOT save a failed run to the template/tool library.
+            self._save_to_library(project, success=False)
+            return "failed"
 
         log_event(project_id=pid, task_name=tn, task_types=tt,
                   event_type="task_complete", actor="program",
-                  api_calls_total=project.ai_call_count)
+                  api_calls_total=count_ai_calls(pid))
         project.status = ProjectStatus.COMPLETED; save_project(project)
-        self._save_to_library(project)
+        self._save_to_library(project, success=True)
         return "completed"
+
+    def _final_verify_linear(self, project, all_files, cmds_after, pid, tn, tt):
+        """Mechanical, AI-free task-level verification for linear mode.
+
+        Returns (ok, failures). ok is True only when every created file exists and is
+        non-empty AND every post-command verify command returns 0. An empty task
+        (no files, no verifiable commands) is treated as trivially ok.
+        """
+        failures = []
+        for f in (all_files or []):
+            p = f.get("path", "")
+            if not p:
+                continue
+            try:
+                if not (os.path.exists(p) and os.path.getsize(p) > 0):
+                    failures.append(f"file missing or empty: {p}")
+            except Exception as e:
+                failures.append(f"file check error ({p}): {e}")
+
+        for c in (cmds_after or []):
+            vc = c.get("verify", "")
+            if not vc:
+                continue
+            try:
+                r = subprocess.run(vc, shell=True, capture_output=True, text=True, timeout=30)
+                if r.returncode != 0:
+                    failures.append(f"verify failed [{c.get('name','')}]: rc={r.returncode}")
+            except Exception as e:
+                failures.append(f"verify error [{c.get('name','')}]: {e}")
+
+        log_event(project_id=pid, task_name=tn, task_types=tt,
+                  event_type="linear_final_verify", actor="program",
+                  verify_passed=1 if not failures else 0,
+                  output_text=("; ".join(failures)[:2000] if failures else "all checks passed"))
+        return (len(failures) == 0), failures
 
     # --- Linear mode helpers ---
 
@@ -533,11 +587,13 @@ class Orchestrator:
             # STEP B: Judge
             judgment = self._judge_logged(pid, tn, tt, brief_json, snapshot_text, brief["user_request"], cycle)
             if judgment.get("goal_met"):
+                # NOTE: cycle-mode completion is still AI-judged (goal_met). For paper
+                # metrics, use out-of-band benchmark criteria as ground truth, not this.
                 log_event(project_id=pid, task_name=tn, task_types=tt,
                           event_type="task_complete", actor="program",
-                          api_calls_total=project.ai_call_count, cycle_number=cycle)
+                          api_calls_total=count_ai_calls(pid), cycle_number=cycle)
                 project.status = ProjectStatus.COMPLETED; save_project(project)
-                self._save_to_library(project); return "completed"
+                self._save_to_library(project, success=True); return "completed"
 
             gap = judgment.get("gap", "")
             next_action = judgment.get("next_action", "")
@@ -743,6 +799,7 @@ class Orchestrator:
             t0 = time.time()
             content = self.ai.ask_text([{"role":"user","content":prompt}])
             dur = int((time.time() - t0) * 1000)
+            u = getattr(self.ai, "last_usage", {}) or {}
 
             # Strip markdown code fences if AI added them
             content = content.strip()
@@ -760,7 +817,9 @@ class Orchestrator:
                       actor="backend_ai", node_id=node.id,
                       ai_prompt=f"Generate content for {path}: {desc[:100]}",
                       ai_response=content[:500] + "..." if len(content) > 500 else content,
-                      ai_model=self._ai_model(), duration_ms=dur, cycle_number=cycle)
+                      ai_model=self._ai_model(), duration_ms=dur,
+                      api_tokens_in=u.get("in", 0), api_tokens_out=u.get("out", 0),
+                      cycle_number=cycle)
 
         except Exception as e:
             log_event(project_id=pid, task_name=tn, task_types=tt,
@@ -1021,7 +1080,15 @@ class Orchestrator:
             lines.append(f"• {cmd.get('name','')}\n  → {c}" if c else f"• {cmd.get('name','')}")
         return "\n".join(lines)
 
-    def _save_to_library(self, project):
+    def _save_to_library(self, project, success=True):
+        # Only successful runs become reusable templates/tools. Saving failed or
+        # silently-degraded runs pollutes the library and biases the evolution-protocol
+        # experiment (templates would carry "successes" that didn't actually work).
+        if not success:
+            return
+        tt_list = project.task_brief.get("command_types", [])
+        if tt_list == ["query"]:
+            return  # pure query tasks don't belong in the template library
         try:
             kw = [k.strip() for k in project.name.split() if len(k.strip())>1][:5]
             tree = project.get_tree_summary()

@@ -10,8 +10,16 @@ logger = logging.getLogger(__name__)
 def _get_conn():
     from littleant.config import DB_PATH
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # WAL + busy_timeout: the polling thread and per-task worker threads write the
+    # same DB concurrently; without this, concurrent writes can raise "database is
+    # locked" and silently drop black-box events.
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        pass
     return conn
 
 def init_db():
@@ -149,6 +157,29 @@ def _trunc(text, max_len=10000):
     if text is None: return None
     text = str(text)
     return text[:max_len] if len(text) > max_len else text
+
+
+def count_ai_calls(project_id):
+    """Accurate per-task AI call count, derived from the black box.
+
+    Every AI request is logged with an event_type starting 'ai_' (ai_classify,
+    ai_linear_plan, ai_batch_files, ai_write_file_content, ai_judge, ai_recovery_*,
+    etc.), including the plain-text ask_text() calls. Counting from the log captures
+    all of them, unlike the legacy in-memory ai_call_count which is only incremented
+    by the (now-unused) recursive decomposer.
+    """
+    if not project_id:
+        return 0
+    try:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) FROM experiment_log WHERE project_id=? AND event_type LIKE 'ai_%'",
+            (project_id,)).fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        logger.warning(f"count_ai_calls failed: {e}")
+        return 0
 
 
 # ============================================================

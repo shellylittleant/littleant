@@ -5,17 +5,20 @@ import subprocess, logging
 logger = logging.getLogger(__name__)
 
 READONLY_WHITELIST = {
-    "cat","head","tail","less","more","ls","ll","dir","tree","find","locate",
-    "wc","grep","awk","whoami","id","hostname","uptime","date",
+    "cat","head","tail","less","more","ls","ll","dir","tree","locate",
+    "wc","grep","whoami","id","hostname","uptime","date",
     "uname","arch","lscpu","lsblk","lspci","lsusb",
     "free","df","du","top","htop","vmstat","iostat","mpstat",
     "ps","pgrep","which","whereis","type",
     "ip","ifconfig","ping","dig","nslookup","host","netstat","ss","curl",
     "traceroute","mtr","systemctl","journalctl",
-    "dpkg","apt-cache","pip","npm","crontab",
+    "dpkg","apt-cache","crontab",
     "file","stat","md5sum","sha256sum",
-    "php","python3","python","node","nginx","mysql",
+    "nginx",
 }
+# NOTE: Interpreters (python/python3/php/node), awk, and find are intentionally
+# NOT whitelisted: they can execute arbitrary code or write files, so a substring
+# blacklist cannot make them safe. Keep them out of the read-only path entirely.
 
 DANGEROUS_PATTERNS = [
     "rm ","rm\t","rmdir","mkfs","dd if=","> ",">> ",

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from littleant.i18n import load_language, t
 from littleant.telegram_bot import TelegramBot
-from littleant.ai.adapter import OpenAICompatibleAdapter, CHAT_PROMPT
+from littleant.ai.adapter import OpenAICompatibleAdapter, AnthropicAdapter, make_adapter, CHAT_PROMPT
 from littleant.core.orchestrator import Orchestrator
 from littleant.core.readonly_executor import run_readonly, is_safe_readonly
 from littleant.models.project import Project, ProjectStatus, NodeStatus
@@ -148,43 +148,84 @@ def main():
     load_language(config.get("language","en"))
     init_db()
 
-    ai = OpenAICompatibleAdapter(
-        api_key=config["ai_api_key"], base_url=config["ai_base_url"], model=config["ai_model"])
+    ai = make_adapter(
+        config.get("ai_provider", "openai"),
+        config["ai_api_key"], config["ai_base_url"], config["ai_model"])
     bot = TelegramBot(config["telegram_token"])
     orch = Orchestrator(ai=ai)
 
     lang = config.get("language","en")
     if lang == "zh":
-        bot.set_menu_commands([("help","查看帮助"),("status","任务进度"),("model","切换AI模型"),("cancel","取消任务")])
+        bot.set_menu_commands([("help","查看帮助"),("status","任务进度"),("model","切换AI模型"),("addadmin","添加管理员"),("cancel","取消任务")])
     else:
-        bot.set_menu_commands([("help","Show help"),("status","Task progress"),("model","Switch AI model"),("cancel","Cancel task")])
+        bot.set_menu_commands([("help","Show help"),("status","Task progress"),("model","Switch AI model"),("addadmin","Add admin"),("cancel","Cancel task")])
+
+    # ======== Access control (see evaluation report S1) ========
+    # Without this, ANY Telegram user who finds the bot can run root-level commands.
+    # First contact auto-registers the sole admin; everyone else must be added via
+    # /addadmin by an existing admin.
+    def is_admin_or_register(cid):
+        admins = config.setdefault("admin_chat_ids", [])
+        if not admins:
+            admins.append(cid)
+            save_setup_config(config)
+            logger.info(f"First admin auto-registered: {cid}")
+            return True
+        return cid in admins
+
+    def deny(cid):
+        bot.send_message(cid, t("not_authorized"))
+        log_event(event_type="access_denied", actor="program", input_text=str(cid))
 
     # ======== Commands ========
     @bot.on_command("start")
     def cmd_start(msg):
-        bot.send_message(msg["chat"]["id"], t("bot_welcome", name=msg["from"].get("first_name","")))
+        cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
+        bot.send_message(cid, t("bot_welcome", name=msg["from"].get("first_name","")))
     @bot.on_command("help")
     def cmd_help(msg):
-        bot.send_message(msg["chat"]["id"], t("bot_help"))
+        cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
+        bot.send_message(cid, t("bot_help"))
+    @bot.on_command("addadmin")
+    def cmd_addadmin(msg):
+        cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
+        parts = msg.get("text","").split()
+        if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+            bot.send_message(cid, t("addadmin_usage", chat_id=cid)); return
+        new_id = int(parts[1])
+        admins = config.setdefault("admin_chat_ids", [])
+        if new_id in admins:
+            bot.send_message(cid, t("admin_already", chat_id=new_id)); return
+        admins.append(new_id); save_setup_config(config)
+        log_event(event_type="admin_added", actor="user", input_text=str(new_id))
+        bot.send_message(cid, t("admin_added", chat_id=new_id))
     @bot.on_command("status")
     def cmd_status(msg):
-        s = get_session(msg["chat"]["id"])
+        cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
+        s = get_session(cid)
         st = s.status_text()
-        bot.send_message(msg["chat"]["id"], t("task_status",status=st) if st else t("no_task"))
+        bot.send_message(cid, t("task_status",status=st) if st else t("no_task"))
     @bot.on_command("cancel")
     def cmd_cancel(msg):
-        s = get_session(msg["chat"]["id"])
+        cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
+        s = get_session(cid)
         if s.current_project_id:
             p = load_project(s.current_project_id)
             if p: p.status=ProjectStatus.ABORTED; save_project(p)
             s.current_project_id=None; s.busy=False; s.state="idle"; s.pending_task=None
             s.confirm_event.set()  # unblock any waiting confirm
-            bot.send_message(msg["chat"]["id"], t("task_cancelled"))
+            bot.send_message(cid, t("task_cancelled"))
         else:
-            bot.send_message(msg["chat"]["id"], t("no_task"))
+            bot.send_message(cid, t("no_task"))
     @bot.on_command("model")
     def cmd_model(msg):
         cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
         current = config.get("ai_provider","?")
         buttons = []
         for pid, info in PROVIDERS_BY_ID.items():
@@ -197,7 +238,9 @@ def main():
     # ======== Message handling ========
     @bot.on_message
     def handle_message(msg):
+        nonlocal ai  # may be rebuilt on provider switch
         cid = msg["chat"]["id"]
+        if not is_admin_or_register(cid): return deny(cid)
         text = msg.get("text","").strip()
         s = get_session(cid)
         bot.send_typing(cid)
@@ -215,7 +258,8 @@ def main():
                 config["ai_provider"]=s.pending_provider; config["ai_api_key"]=text
                 config["ai_base_url"]=prov["base_url"]; config["ai_model"]=prov["model"]
                 save_setup_config(config)
-                ai.api_key=text; ai.base_url=prov["base_url"]; ai.model=prov["model"]
+                ai = make_adapter(s.pending_provider, text, prov["base_url"], prov["model"])
+                orch.ai = ai
                 bot.send_message(cid, f"✅ Switched to {prov['name']}!")
             else:
                 bot.send_message(cid, f"❌ API key invalid: {err}\nTry again or /cancel.")
@@ -421,7 +465,9 @@ def main():
     # ======== Callbacks ========
     @bot.on_callback
     def handle_cb(cb):
+        nonlocal ai  # may be rebuilt on provider switch
         cid = cb["message"]["chat"]["id"]; data = cb.get("data",""); bot.answer_callback(cb["id"])
+        if not is_admin_or_register(cid): return deny(cid)
         s = get_session(cid)
 
         # === Task creation buttons ===
@@ -474,7 +520,8 @@ def main():
                 config["ai_provider"]=pid; config["ai_api_key"]=saved
                 config["ai_base_url"]=info["base_url"]; config["ai_model"]=info["model"]
                 save_setup_config(config)
-                ai.api_key=saved; ai.base_url=info["base_url"]; ai.model=info["model"]
+                ai = make_adapter(pid, saved, info["base_url"], info["model"])
+                orch.ai = ai
                 bot.send_message(cid, f"✅ Switched to {info['name']}!")
             else:
                 s.state="waiting_api_key"; s.pending_provider=pid

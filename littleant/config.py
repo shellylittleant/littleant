@@ -17,6 +17,10 @@ MAX_REPLAN_PER_PARENT = 3
 MAX_L2_ATTEMPTS = 3
 MAX_L3_ATTEMPTS = 2
 
+# Cycle / linear execution limits (previously hardcoded in orchestrator.py)
+MAX_CYCLES = 10
+MAX_REVIEW_ROUNDS = 3
+
 ALLOWED_EXECUTE_TYPES = ["run_shell", "write_file", "make_dir", "read_file", "http_request"]
 ALLOWED_VERIFY_TYPES = [
     "return_code_eq", "file_exists", "content_contains", "service_active",

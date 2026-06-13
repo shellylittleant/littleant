@@ -379,6 +379,7 @@ class OpenAICompatibleAdapter(AIAdapter):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        self.last_usage = {"in": 0, "out": 0}
 
     def ask(self, messages, system_prompt=None):
         return self._parse_json(self._call_api(messages, system_prompt or "", True))
@@ -402,7 +403,10 @@ class OpenAICompatibleAdapter(AIAdapter):
             OpenAICompatibleAdapter._last_call_time = time.time()
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read())["choices"][0]["message"]["content"]
+                    data = json.loads(resp.read())
+                u = data.get("usage", {}) or {}
+                self.last_usage = {"in": u.get("prompt_tokens", 0), "out": u.get("completion_tokens", 0)}
+                return data["choices"][0]["message"]["content"]
             except urllib.error.HTTPError as e:
                 if e.code == 429:
                     w = min(int(e.headers.get("Retry-After",10)),30)
@@ -418,6 +422,128 @@ class OpenAICompatibleAdapter(AIAdapter):
         try: return json.loads(text)
         except json.JSONDecodeError as e:
             raise ValueError(f"Invalid JSON: {e}\nRaw: {text[:500]}")
+
+
+class AnthropicAdapter(AIAdapter):
+    """Native Anthropic Messages API adapter.
+
+    The OpenAI-compatible adapter does NOT work against api.anthropic.com:
+    Anthropic uses POST /v1/messages, header x-api-key + anthropic-version,
+    a top-level `system` field, and a different request/response schema.
+    This adapter speaks that protocol while exposing the same ask()/ask_text()
+    interface as the rest of the system.
+    """
+    _last_call_time = 0
+    _call_interval = 1.0
+
+    def __init__(self, api_key: str, base_url: str = "https://api.anthropic.com/v1",
+                 model: str = "claude-sonnet-4-20250514", timeout: int = 120):
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self.last_usage = {"in": 0, "out": 0}
+
+    def ask(self, messages, system_prompt=None):
+        return self._parse_json(self._call_api(messages, system_prompt))
+
+    def ask_text(self, messages, system_prompt=None):
+        return self._call_api(messages, system_prompt or CHAT_PROMPT)
+
+    def _convert_content(self, content):
+        """Translate OpenAI-style message content into Anthropic blocks."""
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return str(content)
+        out = []
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            bt = b.get("type")
+            if bt == "text":
+                out.append({"type": "text", "text": b.get("text", "")})
+            elif bt == "image_url":
+                url = b.get("image_url", {}).get("url", "")
+                if url.startswith("data:"):
+                    try:
+                        header, data = url.split(",", 1)
+                        media = header.split(";")[0].split(":", 1)[1]
+                        out.append({"type": "image", "source": {
+                            "type": "base64", "media_type": media, "data": data}})
+                    except Exception:
+                        pass
+        return out or ""
+
+    def _normalize_messages(self, messages):
+        norm = []
+        for m in messages:
+            if m.get("role") == "system":
+                continue  # system goes in the top-level `system` field
+            norm.append({"role": m.get("role", "user"),
+                         "content": self._convert_content(m.get("content", ""))})
+        # Anthropic requires the first message to be from the user.
+        while norm and norm[0]["role"] != "user":
+            norm.pop(0)
+        return norm
+
+    def _call_api(self, messages, system_prompt):
+        import urllib.request, urllib.error
+        sys_parts = [m["content"] for m in messages
+                     if m.get("role") == "system" and isinstance(m.get("content"), str)]
+        system = system_prompt or (" ".join(sys_parts) if sys_parts else None)
+        body = {"model": self.model, "max_tokens": 4096, "temperature": 0.2,
+                "messages": self._normalize_messages(messages)}
+        if system:
+            body["system"] = system
+        payload = json.dumps(body).encode("utf-8")
+        wait = self._call_interval - (time.time() - AnthropicAdapter._last_call_time)
+        if wait > 0: time.sleep(wait)
+        for attempt in range(5):
+            req = urllib.request.Request(
+                f"{self.base_url}/messages", data=payload,
+                headers={"content-type": "application/json", "x-api-key": self.api_key,
+                         "anthropic-version": "2023-06-01"}, method="POST")
+            AnthropicAdapter._last_call_time = time.time()
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    data = json.loads(resp.read())
+                u = data.get("usage", {}) or {}
+                self.last_usage = {"in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0)}
+                parts = [b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"]
+                return "".join(parts)
+            except urllib.error.HTTPError as e:
+                if e.code == 429:
+                    w = min(int(e.headers.get("retry-after", 10)), 30)
+                    logger.warning(f"Anthropic 429, wait {w}s (attempt {attempt+1})")
+                    time.sleep(w); continue
+                try: err = e.read().decode()[:300]
+                except Exception: err = str(e)
+                raise RuntimeError(f"Anthropic API error {e.code}: {err}")
+        raise RuntimeError("Anthropic API rate limited 5 times")
+
+    def _parse_json(self, text):
+        text = text.strip()
+        if text.startswith("```"):
+            text = "\n".join(l for l in text.split("\n") if not l.strip().startswith("```")).strip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            # Claude (no JSON mode) may wrap JSON in prose; extract the outermost object.
+            import re
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if m:
+                try: return json.loads(m.group(0))
+                except Exception: pass
+            raise ValueError(f"Invalid JSON from Anthropic: {text[:500]}")
+
+
+def make_adapter(provider_id, api_key, base_url, model, timeout=120):
+    """Build the right adapter for a provider. Anthropic needs its native protocol;
+    everything else is OpenAI-compatible."""
+    if provider_id == "claude":
+        return AnthropicAdapter(api_key, base_url, model, timeout)
+    return OpenAICompatibleAdapter(api_key, base_url, model, timeout)
 
 
 class MockAIAdapter(AIAdapter):

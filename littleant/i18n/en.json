@@ -51,5 +51,10 @@
   "feedback_no_btn": "❌ No, needs improvement",
   "feedback_thanks": "Thanks for the feedback! 👍",
   "feedback_ask_reason": "Thank you for your feedback. To help improve service quality, please describe what didn't meet your expectations.\n\nYour specific feedback will directly improve how similar tasks are handled in the future.",
-  "feedback_saved": "Feedback saved. We'll improve on this. Thank you! 🙏"
+  "feedback_saved": "Feedback saved. We'll improve on this. Thank you! 🙏",
+  "not_authorized": "⛔ You are not authorized to use this bot. Ask an existing admin to add you with /addadmin <your_chat_id>.",
+  "your_chat_id": "Your chat ID is: {chat_id}",
+  "admin_added": "✅ Admin added: {chat_id}",
+  "admin_already": "ℹ️ {chat_id} is already an admin.",
+  "addadmin_usage": "Usage: /addadmin <chat_id>\nYour chat ID is: {chat_id}"
 }

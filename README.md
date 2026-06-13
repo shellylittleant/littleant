@@ -1,9 +1,9 @@
-<h1 align="center">🐜 LittleAnt V14</h1>
+<h1 align="center">🐜 LittleAnt V14.1</h1>
 
 <p align="center"><strong>AI Intent Execution System</strong></p>
 
 <p align="center">
-  Compile natural language intent into executable, verifiable, recoverable server actions — via cycle-based execution.
+  Compile natural language intent into executable, verifiable, recoverable server actions — via a dual execution architecture (cycle + linear) with mechanical verification.
 </p>
 
 <p align="center">
@@ -44,8 +44,8 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 |---|---|---|
 | **Output** | Text / suggestions | Executable shell commands |
 | **Verification** | None or AI-based | Mechanical (zero AI tokens) |
-| **Failure handling** | Crash or ask user | AI self-recovers (retry → modify → skip) |
-| **Task decomposition** | One-shot plan | Cycle: query → judge → act → repeat |
+| **Failure handling** | Crash or ask user | 3-level recovery (L1 retry → L2 diagnose → L3 redesign) |
+| **Execution model** | One-shot plan | Dual: cycle for queries, linear for create/modify |
 | **Transparency** | Black box | Full execution tree, every step logged |
 | **Dependencies** | pip install dozens of packages | None. Pure Python stdlib |
 
@@ -84,7 +84,7 @@ Most AI agent frameworks stop at generating text. LittleAnt turns intent into re
 | Google | Gemini 2.0 Flash | ✅ Supported |
 | xAI | Grok 3 | ✅ Supported |
 
-Any OpenAI-compatible API endpoint works. Actual behavior may vary by model quality and API compatibility.
+Claude uses Anthropic's native Messages API; the other providers use OpenAI-compatible endpoints, so any OpenAI-compatible API also works. Actual behavior may vary by model quality and API compatibility.
 
 ## Quick Start
 
@@ -123,6 +123,16 @@ systemctl enable littleant
 systemctl start littleant
 ```
 
+## Access Control
+
+LittleAnt runs commands as a privileged user, so it is locked down by default. The **first** Telegram user to message the bot is auto-registered as the sole admin; everyone else is denied until an existing admin adds them:
+
+```
+/addadmin <chat_id>
+```
+
+Admins are stored in `littleant/config.json` under `admin_chat_ids`.
+
 ## Usage
 
 | What you say | What happens |
@@ -132,20 +142,23 @@ systemctl start littleant
 | "What's in crontab?" | Runs `crontab -l` directly (read-only), tells you the result |
 | "What's my disk usage?" | Runs `df -h`, summarizes in plain language |
 | /status | Shows current task progress |
+| /model | Switch AI provider/model |
+| /addadmin `<chat_id>` | Add another admin (admins only) |
 | /cancel | Cancels current task |
 
-### How a Task Executes
+### How a Task Executes (create/modify → linear model)
 
 ```
 1. You: "Help me install WordPress"
-2. Front-end AI: "Do you want me to execute this?" → You confirm
-3. Back-end AI designs steps, then scans current system state
-4. AI judges: "nginx not installed, PHP not installed" → writes install commands
-5. AI reviews commands → shows you the plan → you approve → executes
-6. AI rescans system → "nginx installed, PHP installed, need to configure"
-7. AI writes config commands → you approve → executes
-8. AI rescans → everything matches goal → done
+2. One-time authorization: [Confirm] [Auto] [Modify] [Cancel] → you confirm
+3. Back-end AI scans the real system state (installed packages, ports, configs)
+4. AI produces a one-shot plan: pre-commands, files to create/modify, post-commands
+5. Files are batch-generated and written; commands run with 3-level recovery on failure
+6. Final mechanical verification: every file exists & non-empty, every post-command verify returns 0
+7. Reports "completed" only if all checks pass — otherwise reports exactly what failed
 ```
+
+Query/diagnostic tasks use the cycle model instead (scan → judge → act → repeat).
 
 ## Real-World Use Cases
 
@@ -176,7 +189,7 @@ littleant/
 │   │   ├── executor.py       # Command executor
 │   │   ├── verifier.py       # 8 mechanical verifiers
 │   │   ├── recovery.py       # Node removal & crash recovery
-│   │   ├── orchestrator.py   # Cycle engine + 3-level recovery (L1/L2/L3)
+│   │   ├── orchestrator.py   # Cycle + linear engine + 3-level recovery (L1/L2/L3)
 │   │   ├── protocol.py       # Command protocol (20 cmds + 7 feedbacks)
 │   │   └── readonly_executor.py  # Read-only executor with whitelist
 │   ├── models/project.py     # Data models & state machine
@@ -190,8 +203,9 @@ littleant/
 
 - Command set is finite — AI chooses from predefined commands, can't invent new ones
 - All verification is mechanical — zero AI token consumption
+- Task success is decided mechanically — a run is "done" only when files and post-commands actually verify, not when the AI says so
 - Failed nodes are **deleted** from the chain, not marked — execution continues automatically
-- Successful projects auto-save to template library — AI reuses them next time
+- Verified-successful projects auto-save to the template library — AI reuses them next time
 - The operator can be swapped (GPT → Claude → Gemini) — the protocol stays the same
 
 ## Documentation
@@ -210,5 +224,5 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ---
 
 <p align="center">
-  <sub>Built with cycle-based execution and mechanical verification.<br>No third-party dependencies. No trust in AI output.</sub>
+  <sub>Built with dual execution and mechanical verification.<br>No third-party dependencies. No trust in AI output.</sub>
 </p>

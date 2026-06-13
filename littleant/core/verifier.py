@@ -23,9 +23,12 @@ def _precheck(spec):
            "port_open": ["host","port"]}
     for f in req.get(spec.type, []):
         if getattr(spec, f, None) is None:
-            return {"passed": True, "detail": f"verify param '{f}' missing, skipping (pass)"}
+            # Fail-closed: an under-specified verify spec must NOT count as a pass.
+            # A missing parameter means we cannot confirm the effect, so report failure
+            # and let the recovery pipeline handle it.
+            return {"passed": False, "detail": f"verify param '{f}' missing — cannot verify (fail-closed)"}
     if spec.type == "content_contains" and not spec.path and not spec.command:
-        return {"passed": True, "detail": "content_contains: no path or command, skipping"}
+        return {"passed": False, "detail": "content_contains: no path or command — cannot verify (fail-closed)"}
     return None
 
 def _v_rc(s):

@@ -51,5 +51,10 @@
   "feedback_no_btn": "❌ 未达到",
   "feedback_thanks": "感谢反馈！👍",
   "feedback_ask_reason": "感谢您的反馈。为了帮助系统改进，请具体描述哪些方面没有达到您的要求。\n\n您的认真填写将直接提升后续类似任务的执行质量。",
-  "feedback_saved": "反馈已记录，我们会持续改进。谢谢！🙏"
+  "feedback_saved": "反馈已记录，我们会持续改进。谢谢！🙏",
+  "not_authorized": "⛔ 您无权使用此机器人。请让现有管理员用 /addadmin <你的chat_id> 添加你。",
+  "your_chat_id": "你的 chat ID 是：{chat_id}",
+  "admin_added": "✅ 已添加管理员：{chat_id}",
+  "admin_already": "ℹ️ {chat_id} 已经是管理员。",
+  "addadmin_usage": "用法：/addadmin <chat_id>\n你的 chat ID 是：{chat_id}"
 }
